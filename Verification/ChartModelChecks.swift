@@ -259,4 +259,43 @@ do {
     fatalError("Persistence model check failed: \(error)")
 }
 
+// Summary optimization must retain exact cents, withdrawals, and invalid-input guards.
+var firstPlan = BudgetPlan()
+firstPlan.payroll = chartInput("2100.25")
+firstPlan.extra = chartInput("100")
+firstPlan.savings = chartInput("200")
+firstPlan.savingsWithdrawn = chartInput("25.50")
+firstPlan.expenses[0].amount = chartInput("100.10")
+firstPlan.expenses[1].amount = chartInput("20.20")
+var secondPlan = BudgetPlan()
+secondPlan.payroll = chartInput("900.75")
+secondPlan.extra = chartInput("50.50")
+secondPlan.savings = chartInput("100.25")
+secondPlan.savingsWithdrawn = chartInput("10")
+secondPlan.expenses[0].amount = chartInput("35.35")
+let centsTransactions = chartFixture(id: "2026-01", transactionAmounts: ["0.10", "0.20"]).transactions
+let centsSummary = BudgetSummary(plans: [firstPlan, secondPlan], transactions: centsTransactions)
+checkChart(centsSummary.totalIncome == expectedDecimal("3151.50")
+           && centsSummary.totalExpenses == expectedDecimal("155.95")
+           && centsSummary.totalSavings == expectedDecimal("300.25")
+           && centsSummary.totalWithdrawn == expectedDecimal("35.50"),
+           "Summary keeps exact multi-period income, expenses, transactions, and savings")
+checkChart(centsSummary.remaining == expectedDecimal("2730.80") && !centsSummary.hasInvalidAmounts,
+           "Remaining includes savings withdrawals and deducts deposits without rounding cents")
+let emptySummary = BudgetSummary(plans: [])
+checkChart(emptySummary.remaining == .zero && !emptySummary.hasInvalidAmounts,
+           "Empty summaries remain valid zero totals")
+for field in 0..<5 {
+    var invalidPlan = firstPlan
+    switch field {
+    case 0: invalidPlan.payroll = "invalid"
+    case 1: invalidPlan.extra = "invalid"
+    case 2: invalidPlan.savings = "invalid"
+    case 3: invalidPlan.savingsWithdrawn = "invalid"
+    default: invalidPlan.expenses[0].amount = "invalid"
+    }
+    checkChart(BudgetSummary(plans: [secondPlan, invalidPlan]).hasInvalidAmounts,
+               "Summary detects invalid field \(field) in a later pay period")
+}
+
 print("Completed \(completedChartChecks) model checks. SwiftUI/Charts/calendar rendering still requires Xcode.")

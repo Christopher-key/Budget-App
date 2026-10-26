@@ -21,12 +21,21 @@ enum AppLocalFiles {
             throw LocalFileError.unavailableDirectory
         }
         var directory = support.appendingPathComponent("MyBudget", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
-                                               attributes: [.protectionKey: FileProtectionType.complete])
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory) {
+            guard isDirectory.boolValue else { throw LocalFileError.unavailableDirectory }
+        } else {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                   attributes: [.protectionKey: FileProtectionType.complete])
+        }
         // Exclude the parent BEFORE writing, including atomic temporary files.
-        var values = URLResourceValues()
-        values.isExcludedFromBackup = true
-        try directory.setResourceValues(values)
+        if try directory.resourceValues(forKeys: [.isExcludedFromBackupKey])
+            .isExcludedFromBackup != true {
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            try directory.setResourceValues(values)
+        }
+        directory.removeCachedResourceValue(forKey: .isExcludedFromBackupKey)
         guard try directory.resourceValues(forKeys: [.isExcludedFromBackupKey])
             .isExcludedFromBackup == true else { throw LocalFileError.unavailableDirectory }
         return directory
@@ -116,15 +125,31 @@ final class LocalPreferences: ObservableObject {
     func dictionaryRepresentation() -> [String: Any] { values }
 
     func set(_ value: Any?, forKey key: String) {
-        var updated = values
-        updated[key] = value
-        commit(updated)
+        if let value = value {
+            update([key: value])
+        } else {
+            removeObject(forKey: key)
+        }
     }
 
     func removeObject(forKey key: String) {
+        update([:], removing: [key])
+    }
+
+    // Related lock metadata commits together. Unchanged values cause no disk write.
+    func update(_ changes: [String: Any], removing keys: [String] = []) {
+        guard canWrite else { return }
         var updated = values
-        updated.removeValue(forKey: key)
-        commit(updated)
+        var hasChanges = false
+        for (key, value) in changes {
+            if let existing = values[key] as? NSObject, existing.isEqual(value) { continue }
+            updated[key] = value
+            hasChanges = true
+        }
+        for key in keys {
+            if updated.removeValue(forKey: key) != nil { hasChanges = true }
+        }
+        if hasChanges { commit(updated) }
     }
 
     func reset() throws {
@@ -493,12 +518,30 @@ struct BudgetSummary {
     }
 
     init(plans: [BudgetPlan], transactions: [ReportedExpense] = []) {
-        totalIncome = plans.reduce(Decimal.zero) { $0 + $1.totalIncome }
-        totalExpenses = plans.reduce(Decimal.zero) { $0 + $1.totalExpenses }
-            + transactions.reduce(Decimal.zero) { $0 + $1.amount }
-        totalSavings = plans.reduce(Decimal.zero) { $0 + $1.totalSavings }
-        totalWithdrawn = plans.reduce(Decimal.zero) { $0 + $1.totalWithdrawn }
-        hasInvalidAmounts = plans.contains { $0.hasInvalidAmounts }
+        var income = Decimal.zero
+        var expenses = Decimal.zero
+        var savings = Decimal.zero
+        var withdrawn = Decimal.zero
+        var invalid = false
+        func amount(_ text: String) -> Decimal {
+            guard let value = parsedMoney(text) else {
+                invalid = true
+                return .zero
+            }
+            return value
+        }
+        // Parse each field once for both its value and validation.
+        for plan in plans {
+            income += amount(plan.payroll) + amount(plan.extra)
+            expenses += plan.expenses.reduce(Decimal.zero) { $0 + amount($1.amount) }
+            savings += amount(plan.savings)
+            withdrawn += amount(plan.savingsWithdrawn)
+        }
+        totalIncome = income
+        totalExpenses = expenses + transactions.reduce(Decimal.zero) { $0 + $1.amount }
+        totalSavings = savings
+        totalWithdrawn = withdrawn
+        hasInvalidAmounts = invalid
     }
 
     var remaining: Decimal {
@@ -885,6 +928,15 @@ final class AppLockStore: ObservableObject {
         max(0, Int(ceil((retryAfter ?? date).timeIntervalSince(date))))
     }
 
+    var retryTimelineDates: [Date] {
+        let now = Date()
+        guard let deadline = retryAfter, deadline > now else { return [now] }
+        // At most 31 entries, ending exactly at expiry. No recurring idle timer.
+        return [now] + (0..<30).reversed()
+            .map { deadline.addingTimeInterval(-Double($0)) }
+            .filter { $0 > now }
+    }
+
     func lock() {
         if isEnabled { isUnlocked = false }
     }
@@ -931,13 +983,13 @@ final class AppLockStore: ObservableObject {
         guard let record = try PasscodeVault.read() else { throw AppLockError.missingCode }
         guard record.matches(code) else {
             failedAttempts += 1
-            defaults.set(failedAttempts, forKey: failuresKey)
             if failedAttempts >= 5 {
                 let until = Date().addingTimeInterval(30)
+                defaults.update([failuresKey: failedAttempts, retryKey: until])
                 retryAfter = until
-                defaults.set(until, forKey: retryKey)
                 throw AppLockError.waitBeforeRetrying
             }
+            defaults.set(failedAttempts, forKey: failuresKey)
             throw AppLockError.incorrectCode
         }
         clearFailures()
@@ -946,8 +998,7 @@ final class AppLockStore: ObservableObject {
     private func clearFailures() {
         failedAttempts = 0
         retryAfter = nil
-        defaults.removeObject(forKey: failuresKey)
-        defaults.removeObject(forKey: retryKey)
+        defaults.update([:], removing: [failuresKey, retryKey])
     }
 }
 
@@ -1112,19 +1163,21 @@ struct MonthlyRemainingCard: View {
     let month: MonthlyBudget
 
     var body: some View {
+        let budgeted = month.budgetedSummary
+        let realistic = month.realisticSummary
         VStack(alignment: .leading, spacing: 10) {
             Text("Monthly Remaining").font(.headline)
-            if month.budgetedSummary.hasInvalidAmounts {
+            if budgeted.hasInvalidAmounts {
                 Text("Budgeted: correct invalid amounts in Budget.")
                     .foregroundStyle(.red)
             } else {
-                TotalRow(title: "Budgeted remaining", amount: month.budgetedSummary.remaining)
+                TotalRow(title: "Budgeted remaining", amount: budgeted.remaining)
             }
-            if month.realisticSummary.hasInvalidAmounts {
+            if realistic.hasInvalidAmounts {
                 Text("Realistic: correct invalid amounts in Budget.")
                     .foregroundStyle(.red)
             } else {
-                TotalRow(title: "Realistic remaining", amount: month.realisticSummary.remaining)
+                TotalRow(title: "Realistic remaining", amount: realistic.remaining)
             }
         }
         .font(.subheadline)
@@ -1172,19 +1225,10 @@ struct AnnualBudgetChart: View {
         AnnualBudgetComparison.components(of: currentMonthID)?.year ?? 2000
     }
 
-    private var points: [AnnualBudgetPoint] {
-        AnnualBudgetComparison.points(months: months, currentMonthID: currentMonthID)
-    }
-
-    private var segments: [AnnualBudgetSegment] {
-        AnnualBudgetComparison.segments(points: points)
-    }
-
-    private var extent: Double {
-        max(100, (points.map { abs($0.plotValue) }.max() ?? 0) * 1.2)
-    }
-
     var body: some View {
+        let points = AnnualBudgetComparison.points(months: months, currentMonthID: currentMonthID)
+        let segments = AnnualBudgetComparison.segments(points: points)
+        let extent = max(100, (points.map { abs($0.plotValue) }.max() ?? 0) * 1.2)
         VStack(alignment: .leading, spacing: 14) {
             Text("Calendar-Year Spending")
                 .font(.title2.bold())
@@ -1389,6 +1433,7 @@ struct TransactionsView: View {
     }
 
     var body: some View {
+        let transactions = displayedTransactions
         List {
             Section {
                 Picker("Month", selection: $selectedMonthID) {
@@ -1397,15 +1442,15 @@ struct TransactionsView: View {
                     }
                 }
                 TotalRow(title: "Logged this month", amount:
-                    displayedTransactions.reduce(Decimal.zero) { $0 + $1.amount })
+                    transactions.reduce(Decimal.zero) { $0 + $1.amount })
             }
 
             Section {
-                if displayedTransactions.isEmpty {
+                if transactions.isEmpty {
                     Text("No transactions for this month. Tap + to report an expense.")
                         .foregroundStyle(.secondary)
                 }
-                ForEach(displayedTransactions) { transaction in
+                ForEach(transactions) { transaction in
                     Button {
                         editingTransaction = transaction
                     } label: {
@@ -1430,7 +1475,10 @@ struct TransactionsView: View {
                     .buttonStyle(.plain)
                     .accessibilityHint("Edit this transaction")
                 }
-                .onDelete(perform: deleteRows)
+                .onDelete { offsets in
+                    let identifiers = Set(offsets.map { transactions[$0].id })
+                    store.deleteTransactions(ids: identifiers)
+                }
             } header: {
                 Text("Reported expenses")
             } footer: {
@@ -1465,11 +1513,6 @@ struct TransactionsView: View {
         }
     }
 
-    private func deleteRows(at offsets: IndexSet) {
-        let snapshot = displayedTransactions
-        let identifiers = Set(offsets.map { snapshot[$0].id })
-        store.deleteTransactions(ids: identifiers)
-    }
 }
 
 struct TransactionForm: View {
@@ -1824,7 +1867,7 @@ struct PasscodeLockView: View {
                         .foregroundStyle(.secondary)
                     PasscodeInput(title: "Passcode", code: $code)
 
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                    TimelineView(.explicit(appLock.retryTimelineDates)) { context in
                         let seconds = appLock.secondsUntilRetry(at: context.date)
                         VStack(spacing: 12) {
                             if seconds > 0 {
@@ -1885,7 +1928,7 @@ struct PasscodeSettingsForm: View {
     }
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
+        TimelineView(.explicit(appLock.retryTimelineDates)) { context in
             let seconds = appLock.secondsUntilRetry(at: context.date)
             NavigationStack {
                 Form {
@@ -2014,10 +2057,11 @@ struct TrendsView: View {
                     .padding(.vertical)
                 } else {
                     ForEach(months.sorted { $0.id > $1.id }) { month in
+                        let realistic = month.realisticSummary
                         NavigationLink {
                             ScrollView {
                                 VStack(spacing: 20) {
-                                    SummaryCard(title: "Realistic", summary: month.realisticSummary, color: .blue)
+                                    SummaryCard(title: "Realistic", summary: realistic, color: .blue)
                                     SummaryCard(title: "Budgeted", summary: month.budgetedSummary, color: .green)
                                 }
                                 .padding()
@@ -2033,13 +2077,13 @@ struct TrendsView: View {
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
-                                if month.realisticSummary.hasInvalidAmounts {
+                                if realistic.hasInvalidAmounts {
                                     Text("Contains an invalid amount")
                                         .foregroundStyle(.red)
                                 } else {
-                                    Text("Savings change: \((month.realisticSummary.totalSavings - month.realisticSummary.totalWithdrawn).formatted(.currency(code: "USD")))")
+                                    Text("Savings change: \((realistic.totalSavings - realistic.totalWithdrawn).formatted(.currency(code: "USD")))")
                                         .foregroundStyle(.secondary)
-                                    Text("Remaining: \(month.realisticSummary.remaining.formatted(.currency(code: "USD")))")
+                                    Text("Remaining: \(realistic.remaining.formatted(.currency(code: "USD")))")
                                         .foregroundStyle(.secondary)
                                 }
                             }
@@ -2091,11 +2135,12 @@ struct BudgetInputCard: View {
     let color: Color
     var reportedTransactions: [ReportedExpense]? = nil
 
-    private var summary: BudgetSummary {
-        BudgetSummary(plan: plan, transactions: reportedTransactions ?? [])
-    }
-
     var body: some View {
+        let transactions = reportedTransactions ?? []
+        let summary = BudgetSummary(plan: plan, transactions: transactions)
+        let categoryTotals = transactions.reduce(into: [String: Decimal]()) {
+            $0[$1.category, default: .zero] += $1.amount
+        }
         VStack(alignment: .leading, spacing: 16) {
             Text(title).font(.title2.bold()).foregroundStyle(color)
             Text("Income").font(.headline)
@@ -2109,10 +2154,9 @@ struct BudgetInputCard: View {
                     .foregroundStyle(.secondary)
             }
             ForEach($plan.expenses) { $entry in
-                if let transactions = reportedTransactions {
+                if reportedTransactions != nil {
                     RealisticExpenseRow(entry: $entry, reportedAmount:
-                        transactions.filter { $0.category == entry.name }
-                            .reduce(Decimal.zero) { $0 + $1.amount })
+                        categoryTotals[entry.name, default: .zero])
                 } else {
                     MoneyInputRow(name: entry.name, amount: $entry.amount)
                 }
@@ -2122,7 +2166,7 @@ struct BudgetInputCard: View {
             MoneyInputRow(name: "Set aside", amount: $plan.savings)
             MoneyInputRow(name: "Pull from savings", amount: $plan.savingsWithdrawn)
             Divider()
-            if !plan.hasInvalidAmounts {
+            if !summary.hasInvalidAmounts {
                 TotalRow(title: "Remaining", amount: summary.remaining, bold: true)
             }
         }

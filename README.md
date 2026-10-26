@@ -107,3 +107,23 @@ The script tests the actual Foundation-only models for budget arithmetic,
 calendar-year comparisons, section boundaries, schedule changes, and old-data
 migration. UI rendering, device storage, app locking, and network activity require
 separate iPhone/Xcode checks.
+
+## Performance review
+
+Chart points, monthly summaries, and transaction ordering are reused within each
+render. Summary fields are parsed once for both totals and validation; category
+transaction totals are grouped in one pass. Passcode countdowns use a finite
+schedule that ends at expiry instead of refreshing idle forms every second.
+Unchanged preferences cause no write, related lock metadata saves together, and
+existing directory setup is reused while backup exclusion is still verified.
+
+Budget edits still save immediately and atomically. The app still serializes the
+full ledger on each edit, so typing with a large history can remain a bottleneck.
+No CPU reduction or latency improvement has been measured in this workspace.
+
+On an iPhone, use Xcode's **Product → Profile → Time Profiler** to compare typing
+in Budget, scrolling Transactions, opening Trends, and leaving passcode settings
+idle. Use the same representative sample records for each comparison. Also check
+that edits survive an immediate relaunch, five incorrect passcodes trigger the
+30-second cooldown across relaunches, and confirmed reset clears records before
+removing the lock. Run the model checks above before using the updated source.
