@@ -1,0 +1,14 @@
+.DS_Store
+DerivedData/
+build/
+xcuserdata/
+*.xcuserstate
+*.xcarchive/
+*.ipa
+*.dSYM/
+node_modules/
+
+# Device/runtime data must never be committed.
+settings.plist
+passcode.json
+*.recovery.*
