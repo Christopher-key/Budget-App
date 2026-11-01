@@ -13,6 +13,20 @@ target. When dragging them into Xcode, select the app under **Add to targets**.
 Keep the existing `@main` app entry point. Do not add `Verification/` to the target.
 Requires the existing iOS 16+/Xcode 15+ SwiftUI setup.
 
+### Resolving Xcode import and missing-type errors
+
+`ExcelExportUI.swift` must explicitly import `Combine` for `@Published` and
+`ObservableObject`, even when another source file imports that module.
+
+If Xcode cannot find `MonthlyBudget`, `LocalPreferences`, `BudgetStore`, or
+`AppLockStore`, confirm that the complete `ContentView.swift` is installed. All
+four types are defined there at module scope; replacing only the `ContentView`
+view declaration does not install the models. Then select each of the three
+app Swift files, open the File Inspector with **Option-Command-1**, and check the
+same app under **Target Membership**. Choose **Product → Clean Build Folder**
+(Shift-Command-K), then **Command-B**. Remaining diagnostics may be cascading;
+resolve the first fresh build error before changing other declarations.
+
 ## Use on the iPhone
 
 1. Set an app passcode in Settings if none is enabled.
