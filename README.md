@@ -9,6 +9,8 @@ are included.
 
 - Read-only Home with time-of-day greeting, a compact monthly-remaining summary,
   larger current-pay-period breakdowns, and cumulative savings.
+- A Home warning when current-pay-period Realistic expenses reach 70% of the
+  Budgeted expense limit, with a red warning at or above the full limit.
 - Monthly, Bi-Weekly, or Weekly pay schedules with one, two, or four selected
   calendar dates for the current month.
 - Matching editable budget sections for Payroll, Extra, savings deposits and
@@ -84,6 +86,15 @@ and count each transaction once. Changing date boundaries retains manual values
 in section order. Adding sections starts them blank; reducing sections merges
 removed values into the last retained section, preserving monthly totals. Older
 monthly-only records migrate into the first section with additional sections blank.
+
+Home's warning compares only the current section's expenses: manual Realistic
+spending plus logged transactions against that section's Budgeted expenses.
+At 70% spent (30% left), an orange banner appears above the summaries; reaching
+or exceeding the limit turns it red. Income, savings, other pay periods, and other
+months do not affect this expense comparison. An untouched or invalid expense
+budget does not produce a misleading warning. An explicitly entered zero budget
+with positive spending shows an exceeded warning. The banner adds no timer,
+notification service, or network call and changes no stored records.
 
 ## Graph calculation
 

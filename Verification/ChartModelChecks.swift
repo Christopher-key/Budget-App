@@ -298,4 +298,115 @@ for field in 0..<5 {
                "Summary detects invalid field \(field) in a later pay period")
 }
 
+// Home's warning compares only the selected pay period's expense limit and spending.
+func warningPlanFixture(_ amount: String?) -> BudgetPlan {
+    var plan = BudgetPlan()
+    if let amount = amount { plan.expenses[0].amount = chartInput(amount) }
+    return plan
+}
+
+func warningFixture(budget: String?, actual: String?,
+                    transactions: [ReportedExpense] = []) -> PayPeriodBudgetWarning? {
+    PayPeriodBudgetWarning.evaluate(budgeted: warningPlanFixture(budget),
+                                    realistic: warningPlanFixture(actual),
+                                    transactions: transactions)
+}
+
+checkChart(warningFixture(budget: "100", actual: "69.99") == nil,
+           "No pay-period warning appears with more than 30 percent of the expense budget left")
+let warningAtSeventy = warningFixture(budget: "100", actual: "70")
+checkChart(warningAtSeventy?.level == .approaching
+           && warningAtSeventy?.remaining == expectedDecimal("30"),
+           "The warning starts exactly when 30 percent of the expense budget remains")
+checkChart(warningFixture(budget: "100", actual: "99.99")?.level == .approaching,
+           "Spending just below the limit remains an approaching-budget warning")
+checkChart(warningFixture(budget: "100", actual: "100")?.level == .reached,
+           "Exactly using the expense limit is distinguished from exceeding it")
+let warningOverLimit = warningFixture(budget: "100", actual: "100.01")
+checkChart(warningOverLimit?.level == .exceeded
+           && warningOverLimit?.remaining == expectedDecimal("-0.01"),
+           "One cent above the limit reports the exact over-budget amount")
+checkChart(warningFixture(budget: "100.01", actual: "70.00") == nil
+           && warningFixture(budget: "100.01", actual: "70.01")?.level == .approaching,
+           "Cent boundaries compare exact Decimal spending rather than a rounded percentage")
+checkChart(warningFixture(budget: nil, actual: "25") == nil,
+           "An untouched expense budget is not interpreted as an explicit zero-dollar limit")
+checkChart(warningFixture(budget: "0", actual: "0") == nil
+           && warningFixture(budget: "0", actual: nil) == nil,
+           "A zero expense limit does not warn when there is no spending")
+let warningZeroLimit = warningFixture(budget: "0", actual: "0.01")
+checkChart(warningZeroLimit?.level == .exceeded
+           && warningZeroLimit?.remaining == expectedDecimal("-0.01"),
+           "Spending against an explicitly entered zero-dollar budget is over budget")
+
+var warningBudget = warningPlanFixture("100")
+var warningActual = warningPlanFixture("70")
+warningBudget.payroll = "invalid"
+warningBudget.savings = "invalid"
+warningActual.extra = "invalid"
+warningActual.savingsWithdrawn = "invalid"
+checkChart(PayPeriodBudgetWarning.evaluate(budgeted: warningBudget, realistic: warningActual)?.level == .approaching,
+           "Invalid income or savings does not hide a valid expense-only warning")
+warningBudget.expenses[1].amount = "invalid"
+checkChart(PayPeriodBudgetWarning.evaluate(budgeted: warningBudget, realistic: warningActual) == nil,
+           "An invalid budgeted expense prevents a misleading spending warning")
+warningBudget.expenses[1].amount = ""
+warningActual.expenses[1].amount = "invalid"
+checkChart(PayPeriodBudgetWarning.evaluate(budgeted: warningBudget, realistic: warningActual) == nil,
+           "An invalid Realistic expense prevents a misleading spending warning")
+
+var warningRoutedMonth = chartFixture(id: "2026-01", budget: "100", actual: "40")
+warningRoutedMonth.periods[1].budgeted.expenses[0].amount = chartInput("100")
+warningRoutedMonth.periods[1].realistic.expenses[0].amount = chartInput("5")
+warningRoutedMonth.transactions = [
+    datedExpense(monthID: warningRoutedMonth.id, day: 14, amount: "30"),
+    datedExpense(monthID: warningRoutedMonth.id, day: 15, amount: "15")
+]
+let warningFirstWindow = warningRoutedMonth.windows.first { $0.contains(day: 14) }!
+let warningSecondWindow = warningRoutedMonth.windows.first { $0.contains(day: 15) }!
+let warningFirstPeriod = PayPeriodBudgetWarning.evaluate(
+    budgeted: warningRoutedMonth.periods[warningFirstWindow.index].budgeted,
+    realistic: warningRoutedMonth.periods[warningFirstWindow.index].realistic,
+    transactions: warningRoutedMonth.transactions(in: warningFirstWindow))
+let warningSecondPeriod = PayPeriodBudgetWarning.evaluate(
+    budgeted: warningRoutedMonth.periods[warningSecondWindow.index].budgeted,
+    realistic: warningRoutedMonth.periods[warningSecondWindow.index].realistic,
+    transactions: warningRoutedMonth.transactions(in: warningSecondWindow))
+checkChart(warningFirstPeriod?.level == .approaching
+           && warningFirstPeriod?.realisticExpenses == expectedDecimal("70")
+           && warningFirstPeriod?.budgetedExpenses == expectedDecimal("100"),
+           "Current-period manual spending and its logged expense cross the threshold exactly once")
+checkChart(warningSecondPeriod == nil,
+           "The 15th starts a new pay period without carrying the previous period's warning")
+
+var warningWeeklyMonth = warningRoutedMonth
+checkChart(warningWeeklyMonth.applyPaySchedule(PaySchedule(frequency: .weekly, days: [1, 15, 22, 29])),
+           "Warning fixture accepts a four-section weekly schedule")
+let warningWeeklyWindow = warningWeeklyMonth.windows.first { $0.contains(day: 14) }!
+let warningWeekly = PayPeriodBudgetWarning.evaluate(
+    budgeted: warningWeeklyMonth.periods[warningWeeklyWindow.index].budgeted,
+    realistic: warningWeeklyMonth.periods[warningWeeklyWindow.index].realistic,
+    transactions: warningWeeklyMonth.transactions(in: warningWeeklyWindow))
+checkChart(warningWeekly?.level == .approaching
+           && warningWeekly?.realisticExpenses == expectedDecimal("70")
+           && warningWeeklyMonth.periods.count == 4,
+           "Adding empty future weekly sections does not dilute the selected period's warning")
+let warningFutureWindow = warningWeeklyMonth.windows.first { $0.contains(day: 25) }!
+checkChart(PayPeriodBudgetWarning.evaluate(
+    budgeted: warningWeeklyMonth.periods[warningFutureWindow.index].budgeted,
+    realistic: warningWeeklyMonth.periods[warningFutureWindow.index].realistic,
+    transactions: warningWeeklyMonth.transactions(in: warningFutureWindow)) == nil,
+           "An untouched future weekly section does not inherit another section's warning")
+
+var warningMonthlyMonth = chartFixture(id: "2026-02", budget: "100", actual: "40")
+warningMonthlyMonth.transactions = [datedExpense(monthID: warningMonthlyMonth.id, day: 28, amount: "30")]
+checkChart(warningMonthlyMonth.applyPaySchedule(PaySchedule(frequency: .monthly, days: [1])),
+           "Warning fixture accepts a single monthly pay period")
+let warningMonthlyWindow = warningMonthlyMonth.windows.first { $0.contains(day: 28) }!
+checkChart(PayPeriodBudgetWarning.evaluate(
+    budgeted: warningMonthlyMonth.periods[warningMonthlyWindow.index].budgeted,
+    realistic: warningMonthlyMonth.periods[warningMonthlyWindow.index].realistic,
+    transactions: warningMonthlyMonth.transactions(in: warningMonthlyWindow))?.level == .approaching,
+           "A Monthly pay schedule includes late-month logged spending in its one current period")
+
 print("Completed \(completedChartChecks) model checks. SwiftUI/Charts/calendar rendering still requires Xcode.")

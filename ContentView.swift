@@ -549,6 +549,60 @@ struct BudgetSummary {
     }
 }
 
+// MARK: - Current pay-period expense warning
+
+struct PayPeriodBudgetWarning {
+    enum Level: Equatable { case approaching, reached, exceeded }
+
+    let level: Level
+    let budgetedExpenses: Decimal
+    let realisticExpenses: Decimal
+
+    var remaining: Decimal { budgetedExpenses - realisticExpenses }
+
+    static func evaluate(budgeted: BudgetPlan, realistic: BudgetPlan,
+                         transactions: [ReportedExpense] = []) -> PayPeriodBudgetWarning? {
+        // An untouched budget is unknown. Explicitly entered zero is a real limit.
+        guard budgeted.expenses.contains(where: {
+            !$0.amount.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }) else { return nil }
+
+        func expenses(in plan: BudgetPlan) -> Decimal? {
+            var total = Decimal.zero
+            for entry in plan.expenses {
+                guard let amount = parsedMoney(entry.amount), !amount.isNaN,
+                      amount >= .zero else { return nil }
+                total += amount
+            }
+            return total.isNaN ? nil : total
+        }
+
+        guard let limit = expenses(in: budgeted),
+              let manual = expenses(in: realistic) else { return nil }
+        var spent = manual
+        for transaction in transactions {
+            guard !transaction.amount.isNaN, transaction.amount > .zero else { return nil }
+            spent += transaction.amount
+        }
+        guard !spent.isNaN else { return nil }
+
+        let level: Level
+        if spent > limit {
+            level = .exceeded
+        } else if limit > .zero && spent == limit {
+            level = .reached
+        } else {
+            guard limit > .zero else { return nil }
+            // Decimal comparisons preserve the exact 70% boundary, including cents.
+            let threshold = limit * Decimal(7) / Decimal(10)
+            guard !threshold.isNaN, spent >= threshold else { return nil }
+            level = .approaching
+        }
+        return PayPeriodBudgetWarning(level: level, budgetedExpenses: limit,
+                                      realisticExpenses: spent)
+    }
+}
+
 // MARK: - Calendar-year spending comparison
 
 struct AnnualBudgetPoint: Identifiable {
@@ -1152,6 +1206,11 @@ struct HomeView: View {
         // updates at midnight, not only the time-of-day greeting.
         TimelineView(.everyMinute) { context in
             let day = BudgetDates.day(of: context.date)
+            let window = month.windows.first { $0.contains(day: day) }
+            let period = window.flatMap {
+                month.periods.indices.contains($0.index) ? month.periods[$0.index] : nil
+            }
+            let transactions = window.map { month.transactions(in: $0) } ?? []
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     Text(greeting(at: context.date))
@@ -1161,18 +1220,28 @@ struct HomeView: View {
                         .font(.title3)
                         .foregroundStyle(.secondary)
 
+                    // The store may still be rolling over immediately after midnight.
+                    if month.id == BudgetStore.monthID(for: context.date),
+                       let window = window, let period = period,
+                       let warning = PayPeriodBudgetWarning.evaluate(
+                        budgeted: period.budgeted, realistic: period.realistic,
+                        transactions: transactions) {
+                        PayPeriodWarningBanner(warning: warning, periodTitle: window.title)
+                    }
+
                     MonthlyRemainingCard(month: month)
                     TotalSavingsCard(balance: savingsBalance)
 
-                    if let window = month.windows.first(where: { $0.contains(day: day) }),
-                       month.periods.indices.contains(window.index) {
+                    if let window = window, let period = period {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Current Pay Period").font(.title2.bold())
                             Text("\(month.paySchedule.frequency.title) • Days \(window.title)")
                                 .foregroundStyle(.secondary)
                         }
-                        SummaryCard(title: "Realistic", summary: month.realisticSummary(for: window), color: .blue)
-                        SummaryCard(title: "Budgeted", summary: month.budgetedSummary(for: window), color: .green)
+                        SummaryCard(title: "Realistic",
+                                    summary: BudgetSummary(plan: period.realistic, transactions: transactions),
+                                    color: .blue)
+                        SummaryCard(title: "Budgeted", summary: BudgetSummary(plan: period.budgeted), color: .green)
                     }
                 }
                 .padding()
@@ -1189,6 +1258,50 @@ struct HomeView: View {
         case 12..<17: return "Good Afternoon"
         default: return "Good Evening"
         }
+    }
+}
+
+struct PayPeriodWarningBanner: View {
+    let warning: PayPeriodBudgetWarning
+    let periodTitle: String
+
+    private var color: Color { warning.level == .approaching ? .orange : .red }
+
+    private var title: String {
+        switch warning.level {
+        case .approaching: return "Budget warning — 30% or less left"
+        case .reached: return "Pay-period expense budget reached"
+        case .exceeded: return "Pay-period expense budget exceeded"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(color)
+                    .accessibilityHidden(true)
+                Text(title).font(.headline)
+            }
+            Text("Current pay period • Days \(periodTitle)")
+                .font(.subheadline)
+            Text("Realistic expenses: \(warning.realisticExpenses.formatted(.currency(code: "USD"))) of \(warning.budgetedExpenses.formatted(.currency(code: "USD"))) budgeted.")
+                .font(.subheadline)
+            HStack {
+                Text(warning.level == .exceeded ? "Over budget by" : "Expense budget left")
+                Spacer()
+                Text(warning.level == .exceeded ? -warning.remaining : warning.remaining,
+                     format: .currency(code: "USD"))
+                    .foregroundStyle(warning.level == .approaching ? Color.primary : Color.red)
+                    .fontWeight(.bold)
+            }
+            .font(.subheadline)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(color.opacity(0.5), lineWidth: 1))
+        .accessibilityElement(children: .combine)
     }
 }
 
