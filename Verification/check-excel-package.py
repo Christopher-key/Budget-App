@@ -16,6 +16,8 @@ DOCUMENT_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationsh
 CONTENT = "http://schemas.openxmlformats.org/package/2006/content-types"
 NS = {"m": MAIN, "r": REL, "c": CONTENT}
 DETAIL_SHEETS = ["Read Me", "Monthly Summary", "Pay Periods", "Categories", "Transactions"]
+BUCKET_HEADERS = ["Month", "Period", "Start Day", "End Day", "Plan", "Bucket",
+                  "Contribution", "Withdrawal", "NetContribution"]
 
 
 def require(condition, message):
@@ -85,7 +87,7 @@ def rows_from_sheet(root):
     return decoded, list(header.values())
 
 
-def read_workbook(path):
+def read_workbook(path, *, expects_buckets=False):
     with zipfile.ZipFile(path) as archive:
         require(archive.testzip() is None, "Every ZIP entry must have a valid CRC")
         names = archive.namelist()
@@ -121,10 +123,11 @@ def read_workbook(path):
                          roots["xl/_rels/workbook.xml.rels"].findall("r:Relationship", NS)}
         sheets = workbook.findall("m:sheets/m:sheet", NS)
         sheet_names = [sheet.attrib["name"] for sheet in sheets]
-        require(len(sheet_names) > len(DETAIL_SHEETS)
-                and sheet_names[-len(DETAIL_SHEETS):] == DETAIL_SHEETS,
+        detail_names = DETAIL_SHEETS + (["Savings Buckets"] if expects_buckets else [])
+        require(len(sheet_names) > len(detail_names)
+                and sheet_names[-len(detail_names):] == detail_names,
                 "Calendar-year overviews must precede the five unchanged detail sheets")
-        overview_names = sheet_names[:-len(DETAIL_SHEETS)]
+        overview_names = sheet_names[:-len(detail_names)]
         require(all(re.fullmatch(r"CY[0-9]{2,4} Data", name) for name in overview_names),
                 "Overview sheets must use calendar-year names")
         result = {}
@@ -140,7 +143,7 @@ def read_workbook(path):
                 require(0 <= int(cell.attrib.get("s", "0")) < len(styles),
                         "Every cell style index must exist")
             name = sheet.attrib["name"]
-            if name in DETAIL_SHEETS:
+            if name in detail_names:
                 result[name] = rows_from_sheet(roots[package_name])
             else:
                 result[name] = {"cells": cells_from_sheet(roots[package_name]),
@@ -151,6 +154,10 @@ def read_workbook(path):
                               else f"CY{year:04} Data" for year in selected_years]
         require(overview_names == expected_overviews,
                 "Overview sheets must cover exactly the selected years in calendar order")
+        if expects_buckets:
+            require(result["Savings Buckets"][1] == BUCKET_HEADERS,
+                    "Savings detail must expose only the selected period fields, not goals or all-time balances")
+            require(result["Savings Buckets"][0], "Blank-only bucket entries must not create a bucket sheet")
         raw = b"".join(archive.read(name) for name in names)
         require(b"12345678-1234-1234-1234-123456789ABC" not in raw,
                 "Internal transaction UUID leaked into workbook")
@@ -441,7 +448,99 @@ def validate(directory):
             and detail_parking["Logged Amount"] == Decimal("0.25")
             and detail_parking["Total Amount"] == Decimal("2.75"),
             "Expense signs change only in the overview; detail tables keep positive source amounts")
-    print("PASS: Ten native Excel packages validated independently with ZIP/XML/Decimal/layout checks")
+    funded_buckets, raw_buckets = read_workbook(directory / "funded-bucket.xlsx", expects_buckets=True)
+    require(list(funded_buckets)[-1] == "Savings Buckets",
+            "Selected funded bucket detail must be the last worksheet")
+    bucket_rows, _ = funded_buckets["Savings Buckets"]
+    require(len(bucket_rows) == 2, "Only the two entered plan rows should appear as bucket funding")
+    projected_bucket = one(bucket_rows, Month="2026-01", Period=Decimal(1), Plan="Budgeted")
+    actual_bucket = one(bucket_rows, Month="2026-01", Period=Decimal(1), Plan="Realistic")
+    expected_name = '=HYPERLINK("x","BUCKET-LITERAL-NAME & <😀>")'
+    for row in (projected_bucket, actual_bucket):
+        require(row["Bucket"] == expected_name and row["Start Day"] == Decimal(1)
+                and row["End Day"] == Decimal(14),
+                "Bucket name snapshots must remain literal text in their recorded pay period")
+    require(projected_bucket["Contribution"] == Decimal(40)
+            and projected_bucket["Withdrawal"] == Decimal(3)
+            and projected_bucket["NetContribution"] == Decimal(37)
+            and actual_bucket["Contribution"] == Decimal(25)
+            and actual_bucket["Withdrawal"] == Decimal(5)
+            and actual_bucket["NetContribution"] == Decimal(20),
+            "Bucket table must distinguish planned and realistic funding without combining their totals")
+    require(b"11111111-2222-3333-4444-555555555555" not in raw_buckets,
+            "Bucket internal identifiers must never appear in an exported report")
+    require("Notes" not in funded_buckets["Transactions"][1]
+            and b"PRIVATE-NOTE-TEST" not in raw_buckets,
+            "Adding bucket exports must not opt transaction notes into the report")
+    bucket_summary = one(funded_buckets["Monthly Summary"][0], Month="2026-01")
+    expected_bucket_summary = {"Budgeted Savings Deposits": "340", "Budgeted Savings Withdrawals": "3",
+                               "Budgeted Remaining": "1663", "Savings Deposits": "175.25",
+                               "Savings Withdrawals": "15", "Savings Change": "160.25",
+                               "Realistic Remaining": "1615.35", "Realistic Expenses": "150.90",
+                               "Expense Budget Remaining": "49.10"}
+    for label, amount in expected_bucket_summary.items():
+        require(bucket_summary[label] == Decimal(amount), f"Bucket accounting changed {label}")
+    bucket_periods = funded_buckets["Pay Periods"][0]
+    actual_period = one(bucket_periods, Month="2026-01", Period=Decimal(1), Plan="Realistic")
+    projected_period = one(bucket_periods, Month="2026-01", Period=Decimal(1), Plan="Budgeted")
+    require(actual_period["Savings Deposits"] == Decimal(125)
+            and actual_period["Savings Withdrawals"] == Decimal(15)
+            and actual_period["Remaining"] == Decimal("795.20")
+            and actual_period["Payroll"] == Decimal("1000.10")
+            and actual_period["Extra"] == Decimal("25.50"),
+            "General savings and bucket funding must aggregate once without changing income")
+    require(projected_period["Savings Deposits"] == Decimal(240)
+            and projected_period["Savings Withdrawals"] == Decimal(3)
+            and projected_period["Remaining"] == Decimal(813),
+            "Projected bucket funding must remain separate from Realistic funding")
+    bucket_overview = funded_buckets["CY26 Data"]
+    validate_overview(bucket_overview, january_headers, actual_blocks=(0, 1))
+    expected_bucket_cells = {"A5": "3", "B5": "15", "A14": "-240", "B14": "-125",
+                             "A18": "-390", "B18": "-245.40", "A19": "813", "B19": "795.20"}
+    for reference, amount in expected_bucket_cells.items():
+        require(overview_value(bucket_overview, reference) == Decimal(amount),
+                f"CY savings row must aggregate general and bucket amounts exactly once at {reference}")
+
+    blank_buckets, raw_blank_buckets = read_workbook(directory / "blank-bucket.xlsx")
+    validate_overview(blank_buckets["CY26 Data"], february_headers)
+    require("Savings Buckets" not in blank_buckets
+            and b"EMPTY-BUCKET-NAME-SHOULD-NOT-EXPORT" not in raw_blank_buckets,
+            "Blank-only bucket entries must not expose unused names or create an extra sheet")
+    zero_buckets, _ = read_workbook(directory / "zero-bucket.xlsx", expects_buckets=True)
+    validate_overview(zero_buckets["CY26 Data"], february_headers, actual_blocks=(0,))
+    zero_rows = zero_buckets["Savings Buckets"][0]
+    require(len(zero_rows) == 2 and all(row["Contribution"] == Decimal(0)
+                                      and row["Withdrawal"] is None
+                                      and row["NetContribution"] == Decimal(0) for row in zero_rows),
+            "An explicitly entered zero bucket contribution must preserve a blank withdrawal")
+    require(overview_value(zero_buckets["CY26 Data"], "B14") == Decimal(0)
+            and overview_value(zero_buckets["CY26 Data"], "B5") is None,
+            "Bucket-only zero contributions must count as input without inventing withdrawals")
+
+    withdrawal_buckets, _ = read_workbook(directory / "withdrawal-only-bucket.xlsx", expects_buckets=True)
+    validate_overview(withdrawal_buckets["CY26 Data"], february_headers, actual_blocks=(0,))
+    withdrawal_row = one(withdrawal_buckets["Savings Buckets"][0], Month="2026-02",
+                         Period=Decimal(1), Plan="Realistic")
+    require(withdrawal_row["Contribution"] is None and withdrawal_row["Withdrawal"] == Decimal(5)
+            and withdrawal_row["NetContribution"] == Decimal(-5),
+            "Withdrawal-only bucket records must retain their missing contribution")
+    withdrawal_period = one(withdrawal_buckets["Pay Periods"][0], Month="2026-02",
+                            Period=Decimal(1), Plan="Realistic")
+    require(withdrawal_period["Savings Deposits"] is None
+            and withdrawal_period["Savings Withdrawals"] == Decimal(5)
+            and withdrawal_period["Remaining"] == Decimal(5)
+            and overview_value(withdrawal_buckets["CY26 Data"], "B14") is None
+            and overview_value(withdrawal_buckets["CY26 Data"], "B5") == Decimal(5)
+            and overview_value(withdrawal_buckets["CY26 Data"], "B19") == Decimal(5),
+            "Bucket withdrawal increases available cash once without fabricating a savings deposit")
+    selected_no_buckets, raw_selected_no_buckets = read_workbook(directory / "selected-no-buckets.xlsx")
+    validate_overview(selected_no_buckets["CY26 Data"], january_headers, actual_blocks=(0, 1))
+    require("Savings Buckets" not in selected_no_buckets
+            and b"OUTSIDE-BUCKET-DO-NOT-EXPORT" not in raw_selected_no_buckets
+            and b"444444.44" not in raw_selected_no_buckets
+            and b"ABCDEFAB-CDEF-ABCD-EFAB-CDEFABCDEFAB" not in raw_selected_no_buckets,
+            "Buckets outside the selected months must not create sheets, expose names, IDs, or funding")
+    print("PASS: Fifteen native Excel packages validated independently with ZIP/XML/Decimal/layout/bucket checks")
 
 
 if __name__ == "__main__":

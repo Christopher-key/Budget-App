@@ -8,6 +8,7 @@ the supplied offline app code; verify it against the app you actually submit.
 ## Information you enter
 
 Income, pay schedules and dates, budgets, spending categories, reported transactions, notes, savings,
+savings-bucket names and targets, contributions and withdrawals,
 and monthly history are processed and stored locally by the app. The app does
 not automatically send these records to the developer, a server, an analytics
 service, or an advertising service. No account or internet connection is required
@@ -28,6 +29,8 @@ with the app passcode. There is no automatic ChatGPT, Microsoft, or other API co
 Local export history records timestamps, selected months, counts, format, note
 inclusion, and outcomes, without recording financial amounts or note text.
 An iOS-reported handoff does not confirm that a recipient opened or retained a file.
+Selected-period bucket entries and their historical names appear when present;
+global targets and all-time goal progress are not included in the Excel export.
 
 ## Passcode
 

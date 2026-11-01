@@ -7,8 +7,8 @@ are included.
 
 ## Features
 
-- Read-only Home with time-of-day greeting, a compact monthly-remaining summary,
-  larger current-pay-period breakdowns, and cumulative savings.
+- Read-only Home with time-of-day greeting, compact savings-bucket progress,
+  current-pay-period breakdowns, and cumulative savings.
 - A compact Home warning listing expense categories that have used at least 70%
   of their own current-pay-period budgets, with the amount left for each category.
 - Monthly, Bi-Weekly, or Weekly pay schedules with one, two, or four selected
@@ -16,7 +16,9 @@ are included.
 - Matching editable budget sections for Payroll, Extra, savings deposits and
   withdrawals, and the ten predefined expense categories.
 - Self-reported transactions with category, date, amount, note, editing, and deletion.
-- One combined monthly result for Home's compact summary and the Trends tab.
+- Combined monthly results in Trends and Excel reports.
+- Savings goals with active-only contribution fields and a withdrawal popup that
+  selects general Set aside or a specific bucket.
 - Orange current-year and purple previous-year chart lines with green/red monthly
   points for expense budget met/exceeded, in Trends → History & Trends alongside
   read-only monthly history (including the current month in progress).
@@ -35,7 +37,8 @@ Requires Xcode 15 or later and an **iOS App / SwiftUI** target with iOS 16 or la
    iOS → App, with SwiftUI and Swift selected.
 2. Replace the entire contents of its `ContentView.swift` with this repository's
    file. Keep the app's existing `@main` entry point that displays `ContentView()`.
-   Add `ExcelExport.swift` and `ExcelExportUI.swift` to the same iOS app target.
+   Add `ExcelExport.swift`, `ExcelExportUI.swift`, and `SavingsBucketsUI.swift`
+   to the same iOS app target.
 3. Add `PrivacyInfo.xcprivacy` to the app target. Merge it with an existing manifest
    rather than creating conflicting duplicates.
 4. Choose an iPhone simulator or connected iPhone, then press Command-R.
@@ -62,6 +65,19 @@ pale-yellow headers, three-column pay-period blocks, and signed cash outflows.
 They are generated from app records; the private reference workbook is not included.
 Savings withdrawals replace its automatic carryover line so totals retain the
 app's meaning. The export instructions explain the matched and adapted features.
+
+## Savings buckets
+
+Create goals in **Settings → Savings buckets**. Home shows each active goal's
+name and saved/target amounts in place of monthly remaining. Realistic contributions
+update progress across months; Budgeted entries are plans. Bucket contributions
+are additional to general Set aside and reduce remaining money once.
+
+**Budget → Pull from savings** opens a popup to choose Set aside or a named bucket
+and update that source's total withdrawal for the selected pay period. Realistic
+bucket withdrawals lower its progress; general withdrawals leave bucket balances
+unchanged. See [savings-bucket instructions](SAVINGS-BUCKETS.md) for examples,
+archiving, accounting, and export scope.
 
 ## Pay dates and budget sections
 
@@ -147,6 +163,8 @@ The script tests the actual Foundation-only models for budget arithmetic,
 calendar-year comparisons, section boundaries, schedule changes, and old-data
 migration. UI rendering, device storage, app locking, and network activity require
 separate iPhone/Xcode checks.
+The same model harness includes savings-bucket arithmetic, migration, progress,
+and withdrawal checks using synthetic records.
 The Excel harness also requires Python 3 to independently inspect synthetic `.xlsx`
 packages. The app and Swift-generated workbooks have not been run in this workspace.
 

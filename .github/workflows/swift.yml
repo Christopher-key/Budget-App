@@ -26,4 +26,4 @@ jobs:
         xcrun --sdk iphonesimulator swiftc -typecheck \
           -sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" \
           -target arm64-apple-ios16.0-simulator -swift-version 5 \
-          ContentView.swift ExcelExport.swift ExcelExportUI.swift
+          ContentView.swift ExcelExport.swift ExcelExportUI.swift SavingsBucketsUI.swift

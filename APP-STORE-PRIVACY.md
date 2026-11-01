@@ -15,6 +15,10 @@
   Parent backup exclusion is set and verified before writing. Files use iOS
   complete file protection and atomic writes. Redundant individual file backup
   flags are also attempted; parent exclusion covers atomic replacements.
+- `SavingsBucketsUI.swift` provides local goal management and a withdrawal-source
+  popup. Add it to the iOS target. Definitions and ledger entries are committed
+  together; active-only contribution fields, Realistic progress, archival history,
+  and selected-month Excel bucket details add no network service or SDK.
 - Settings includes a static, offline Privacy Policy screen. Keep that text and
   the published policy consistent with the final shipped app.
 - Trends → History & Trends includes an on-device Swift Charts comparison of current/prior calendar
@@ -47,7 +51,7 @@
 ## Add to Xcode
 
 1. Replace the existing ContentView.swift contents with this version.
-   Add ExcelExport.swift and ExcelExportUI.swift to the same iOS target.
+   Add ExcelExport.swift, ExcelExportUI.swift, and SavingsBucketsUI.swift to the same iOS target.
 2. Add PrivacyInfo.xcprivacy to the app target. If a manifest already exists,
    merge these entries instead of adding a conflicting duplicate. Check target
    membership and that the manifest is included in the built app.

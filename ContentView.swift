@@ -136,6 +136,12 @@ final class LocalPreferences: ObservableObject {
         update([:], removing: [key])
     }
 
+    // Corrupt metadata must not be replaced by a new empty, apparently healthy copy.
+    func failClosed(reason: String) {
+        canWrite = false
+        errorMessage = reason
+    }
+
     // Related lock metadata commits together. Unchanged values cause no disk write.
     func update(_ changes: [String: Any], removing keys: [String] = []) {
         guard canWrite else { return }
@@ -291,19 +297,118 @@ struct PaySchedule: Codable, Equatable, Sendable {
     }
 }
 
+struct SavingsBucket: Identifiable, Codable, Sendable {
+    var id: UUID
+    var name: String
+    var target: String
+    var isActive: Bool
+
+    init(id: UUID = UUID(), name: String, target: String, isActive: Bool = true) {
+        self.id = id
+        self.name = name
+        self.target = target
+        self.isActive = isActive
+    }
+
+    var hasValidDetails: Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 60,
+              trimmed.rangeOfCharacter(from: .controlCharacters) == nil,
+              let amount = parsedMoney(target), !amount.isNaN, amount > .zero else { return false }
+        return true
+    }
+}
+
+struct BucketSavingsEntry: Identifiable, Codable, Sendable {
+    // The ID references a bucket; the name is a historical display snapshot.
+    var id: UUID
+    var name: String
+    var contribution: String
+    var withdrawal: String
+
+    init(id: UUID, name: String, contribution: String = "", withdrawal: String = "") {
+        self.id = id
+        self.name = name
+        self.contribution = contribution
+        self.withdrawal = withdrawal
+    }
+
+    var hasInvalidAmounts: Bool {
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return true }
+        return [contribution, withdrawal].contains { text in
+            guard let value = parsedMoney(text), !value.isNaN, value >= .zero else { return true }
+            return false
+        }
+    }
+}
+
+struct SavingsBucketProgress: Identifiable {
+    let bucket: SavingsBucket
+    let saved: Decimal?
+    var id: UUID { bucket.id }
+}
+
+enum SavingsBucketLedger {
+    // Definitions never supply a second, manually entered balance. Actual entries
+    // are the single source of progress, including archived bucket history.
+    static func progress(for bucket: SavingsBucket, months: [MonthlyBudget]) -> SavingsBucketProgress {
+        progress(buckets: [bucket], months: months)[0]
+    }
+
+    static func progress(buckets: [SavingsBucket], months: [MonthlyBudget]) -> [SavingsBucketProgress] {
+        var balances: [UUID: Decimal] = [:]
+        var invalid = Set<UUID>()
+        for month in months {
+            for plan in month.realisticPlans {
+                var seen = Set<UUID>()
+                for entry in plan.bucketEntries {
+                    if !seen.insert(entry.id).inserted { invalid.insert(entry.id) }
+                    guard !entry.hasInvalidAmounts,
+                          let added = parsedMoney(entry.contribution),
+                          let used = parsedMoney(entry.withdrawal) else {
+                        invalid.insert(entry.id)
+                        continue
+                    }
+                    let saved = (balances[entry.id] ?? .zero) + added - used
+                    if saved.isNaN { invalid.insert(entry.id) }
+                    balances[entry.id] = saved
+                }
+            }
+        }
+        return buckets.map { bucket in
+            SavingsBucketProgress(bucket: bucket,
+                saved: bucket.hasValidDetails && !invalid.contains(bucket.id)
+                    ? balances[bucket.id] ?? .zero : nil)
+        }
+    }
+
+    static func totalSavings(months: [MonthlyBudget]) -> Decimal? {
+        var balance = Decimal.zero
+        for month in months {
+            for plan in month.realisticPlans {
+                guard !plan.hasInvalidSavingsAmounts else { return nil }
+                balance += plan.totalSavings - plan.totalWithdrawn
+                if balance.isNaN { return nil }
+            }
+        }
+        return balance
+    }
+}
+
 struct BudgetPlan: Codable, Sendable {
     var payroll = ""
     var extra = ""
     var savings = ""
     var savingsWithdrawn = ""
     var expenses = expenseCategories.map { ExpenseEntry(name: $0) }
+    var bucketEntries: [BucketSavingsEntry] = []
 
     init() {}
 
     // Older saved budgets have no withdrawal field. Treat it as zero
     // so updating the app keeps all previously entered months.
     private enum CodingKeys: String, CodingKey {
-        case payroll, extra, savings, savingsWithdrawn, expenses
+        case payroll, extra, savings, savingsWithdrawn, expenses, bucketEntries
     }
 
     init(from decoder: Decoder) throws {
@@ -314,6 +419,7 @@ struct BudgetPlan: Codable, Sendable {
         savings = try values.decode(String.self, forKey: .savings)
         savingsWithdrawn = try values.decodeIfPresent(String.self, forKey: .savingsWithdrawn) ?? ""
         expenses = try values.decode([ExpenseEntry].self, forKey: .expenses)
+        bucketEntries = try values.decodeIfPresent([BucketSavingsEntry].self, forKey: .bucketEntries) ?? []
     }
 
     var totalIncome: Decimal {
@@ -324,8 +430,14 @@ struct BudgetPlan: Codable, Sendable {
         expenses.reduce(Decimal.zero) { $0 + moneyValue($1.amount) }
     }
 
-    var totalSavings: Decimal { moneyValue(savings) }
-    var totalWithdrawn: Decimal { moneyValue(savingsWithdrawn) }
+    var totalBucketContributions: Decimal {
+        bucketEntries.reduce(Decimal.zero) { $0 + moneyValue($1.contribution) }
+    }
+    var totalBucketWithdrawals: Decimal {
+        bucketEntries.reduce(Decimal.zero) { $0 + moneyValue($1.withdrawal) }
+    }
+    var totalSavings: Decimal { moneyValue(savings) + totalBucketContributions }
+    var totalWithdrawn: Decimal { moneyValue(savingsWithdrawn) + totalBucketWithdrawals }
     var netSavings: Decimal { totalSavings - totalWithdrawn }
 
     var remaining: Decimal {
@@ -333,8 +445,17 @@ struct BudgetPlan: Codable, Sendable {
     }
 
     var hasInvalidAmounts: Bool {
-        ([payroll, extra, savings, savingsWithdrawn] + expenses.map(\.amount))
-            .contains { parsedMoney($0) == nil }
+        ([payroll, extra] + expenses.map(\.amount)).contains { parsedMoney($0) == nil }
+            || hasInvalidSavingsAmounts
+    }
+
+    var hasInvalidSavingsAmounts: Bool {
+        [savings, savingsWithdrawn].contains { text in
+            guard let value = parsedMoney(text), !value.isNaN, value >= .zero else { return true }
+            return false
+        } || bucketEntries.contains { $0.hasInvalidAmounts }
+            || Set(bucketEntries.map(\.id)).count != bucketEntries.count
+            || totalSavings.isNaN || totalWithdrawn.isNaN
     }
 
     func combined(with other: BudgetPlan) -> BudgetPlan? {
@@ -356,7 +477,15 @@ struct BudgetPlan: Codable, Sendable {
                 result.expenses.append(expense)
             }
         }
-        return result
+        for entry in other.bucketEntries {
+            if let index = result.bucketEntries.firstIndex(where: { $0.id == entry.id }) {
+                result.bucketEntries[index].contribution = add(result.bucketEntries[index].contribution, entry.contribution)
+                result.bucketEntries[index].withdrawal = add(result.bucketEntries[index].withdrawal, entry.withdrawal)
+            } else {
+                result.bucketEntries.append(entry)
+            }
+        }
+        return result.hasInvalidAmounts ? nil : result
     }
 }
 
@@ -536,6 +665,11 @@ struct BudgetSummary {
             expenses += plan.expenses.reduce(Decimal.zero) { $0 + amount($1.amount) }
             savings += amount(plan.savings)
             withdrawn += amount(plan.savingsWithdrawn)
+            for entry in plan.bucketEntries {
+                savings += amount(entry.contribution)
+                withdrawn += amount(entry.withdrawal)
+            }
+            if plan.hasInvalidSavingsAmounts { invalid = true }
         }
         totalIncome = income
         totalExpenses = expenses + transactions.reduce(Decimal.zero) { $0 + $1.amount }
@@ -753,10 +887,15 @@ final class BudgetStore: ObservableObject {
     @Published var months: [MonthlyBudget] {
         didSet { save() }
     }
+    @Published private(set) var savingsBuckets: [SavingsBucket] = [] {
+        didSet { save() }
+    }
     @Published private(set) var currentMonthID: String
 
     private let storageKey = "MyBudget.months.v1"
+    private let bucketsKey = "MyBudget.savingsBuckets.v1"
     private let defaults = LocalPreferences.shared
+    private var isResetting = false
 
     init() {
         let savedDefaults = LocalPreferences.shared
@@ -770,10 +909,26 @@ final class BudgetStore: ObservableObject {
                 let recoveryKey = key + ".recovery."
                     + UUID().uuidString
                 savedDefaults.set(data, forKey: recoveryKey)
+                savedDefaults.failClosed(reason: "Saved budgets could not be read safely. Existing records and recovery copies have been retained. Close and reopen the app before trying again.")
                 months = []
             }
         } else {
             months = []
+        }
+        do {
+            if let stored = savedDefaults.object(forKey: bucketsKey) {
+                guard let data = stored as? Data else { throw LocalFileError.invalidSettings }
+                let loaded = try JSONDecoder().decode([SavingsBucket].self, from: data)
+                guard Self.validBuckets(loaded) else { throw LocalFileError.invalidSettings }
+                savingsBuckets = loaded
+            }
+            let knownIDs = Set(savingsBuckets.map(\.id))
+            let recordedIDs = Set(months.flatMap { month in
+                (month.realisticPlans + month.budgetedPlans).flatMap { $0.bucketEntries.map(\.id) }
+            })
+            guard recordedIDs.isSubset(of: knownIDs) else { throw LocalFileError.invalidSettings }
+        } catch {
+            savedDefaults.failClosed(reason: "Savings bucket details could not be read safely. Existing saved files have been retained. Close and reopen the app before trying again.")
         }
         prepareCurrentMonth()
         // Persist migrated period records and transaction day metadata before a
@@ -792,17 +947,48 @@ final class BudgetStore: ObservableObject {
 
     // Planned savings never count as money actually saved.
     var savingsBalance: Decimal? {
-        var balance = Decimal.zero
-        for month in months {
-            for plan in month.realisticPlans {
-                guard let added = parsedMoney(plan.savings),
-                      let withdrawn = parsedMoney(plan.savingsWithdrawn) else {
-                    return nil
-                }
-                balance += added - withdrawn
-            }
+        SavingsBucketLedger.totalSavings(months: months)
+    }
+
+    var activeBucketProgress: [SavingsBucketProgress] {
+        bucketProgress.filter { $0.bucket.isActive }
+    }
+
+    var bucketProgress: [SavingsBucketProgress] {
+        SavingsBucketLedger.progress(buckets: savingsBuckets, months: months)
+    }
+
+    func progress(for bucket: SavingsBucket) -> SavingsBucketProgress {
+        SavingsBucketLedger.progress(for: bucket, months: months)
+    }
+
+    @discardableResult
+    func saveSavingsBucket(_ bucket: SavingsBucket) -> Bool {
+        guard defaults.errorMessage == nil else { return false }
+        var normalized = bucket
+        normalized.name = bucket.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalized.hasValidDetails else { return false }
+        var updated = savingsBuckets
+        if let index = updated.firstIndex(where: { $0.id == normalized.id }) {
+            updated[index] = normalized
+        } else {
+            updated.append(normalized)
         }
-        return balance
+        guard Self.validBuckets(updated) else { return false }
+        savingsBuckets = updated
+        return defaults.errorMessage == nil
+    }
+
+    private static func validBuckets(_ buckets: [SavingsBucket]) -> Bool {
+        guard Set(buckets.map(\.id)).count == buckets.count,
+              buckets.allSatisfy(\.hasValidDetails) else { return false }
+        for index in buckets.indices {
+            if buckets.prefix(index).contains(where: {
+                $0.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .caseInsensitiveCompare(buckets[index].name.trimmingCharacters(in: .whitespacesAndNewlines)) == .orderedSame
+            }) { return false }
+        }
+        return true
     }
 
     func prepareCurrentMonth() {
@@ -877,8 +1063,13 @@ final class BudgetStore: ObservableObject {
         try defaults.reset()
         let now = Date()
         let identifier = Self.monthID(for: now)
+        isResetting = true
+        savingsBuckets = []
         months = [MonthlyBudget(id: identifier, date: now)]
         currentMonthID = identifier
+        isResetting = false
+        save()
+        guard defaults.errorMessage == nil else { throw LocalFileError.invalidSettings }
     }
 
     static func monthID(for date: Date) -> String {
@@ -889,8 +1080,16 @@ final class BudgetStore: ObservableObject {
     }
 
     private func save() {
-        guard let data = try? JSONEncoder().encode(months) else { return }
-        defaults.set(data, forKey: storageKey)
+        guard !isResetting, defaults.errorMessage == nil else { return }
+        do {
+            let encoder = JSONEncoder()
+            let data = try encoder.encode(months)
+            let buckets = try encoder.encode(savingsBuckets)
+            // Ledger and definitions enter the same protected atomic plist commit.
+            defaults.update([storageKey: data, bucketsKey: buckets])
+        } catch {
+            defaults.failClosed(reason: "The latest budgets and savings buckets could not be encoded safely. Existing saved files have been retained. Close and reopen the app.")
+        }
     }
 }
 
@@ -1195,14 +1394,15 @@ struct BudgetTabs: View {
         TabView {
             NavigationStack {
                 if let index = store.currentMonthIndex {
-                    HomeView(month: store.months[index], savingsBalance: store.savingsBalance)
+                    HomeView(month: store.months[index], savingsBalance: store.savingsBalance,
+                             bucketProgress: store.activeBucketProgress)
                 }
             }
             .tabItem { Label("Home", systemImage: "house.fill") }
 
             NavigationStack {
                 if let index = store.currentMonthIndex {
-                    BudgetEditorView(month: $store.months[index])
+                    BudgetEditorView(month: $store.months[index], savingsBuckets: store.savingsBuckets)
                 }
             }
             .tabItem { Label("Budget", systemImage: "pencil.and.list.clipboard") }
@@ -1229,6 +1429,7 @@ struct BudgetTabs: View {
 struct HomeView: View {
     let month: MonthlyBudget
     let savingsBalance: Decimal?
+    let bucketProgress: [SavingsBucketProgress]
 
     var body: some View {
         // Refresh the whole summary at minute boundaries so the active section
@@ -1260,7 +1461,7 @@ struct HomeView: View {
                         }
                     }
 
-                    MonthlyRemainingCard(month: month)
+                    SavingsBucketsPreview(progress: bucketProgress)
                     TotalSavingsCard(balance: savingsBalance)
 
                     if let window = window, let period = period {
@@ -1519,6 +1720,7 @@ struct AnnualBudgetChart: View {
 
 struct BudgetEditorView: View {
     @Binding var month: MonthlyBudget
+    let savingsBuckets: [SavingsBucket]
     @State private var selectedPeriod = 0
 
     var body: some View {
@@ -1552,11 +1754,15 @@ struct BudgetEditorView: View {
                             .foregroundStyle(.secondary)
                     }
                     BudgetInputCard(title: "Realistic", plan: $month.periods[selectedPeriod].realistic,
-                                    color: .blue, reportedTransactions: month.transactions(in: window))
-                    BudgetInputCard(title: "Budgeted", plan: $month.periods[selectedPeriod].budgeted, color: .green)
+                                    color: .blue, reportedTransactions: month.transactions(in: window),
+                                    savingsBuckets: savingsBuckets)
+                        .id("\(month.id)-\(selectedPeriod)-\(window.startDay)-\(window.endDay)-realistic")
+                    BudgetInputCard(title: "Budgeted", plan: $month.periods[selectedPeriod].budgeted,
+                                    color: .green, savingsBuckets: savingsBuckets)
+                        .id("\(month.id)-\(selectedPeriod)-\(window.startDay)-\(window.endDay)-budgeted")
                 }
 
-                Text("Enter income, savings, and spending for the selected section only. Home, History, and the graph combine every section into one month. Under Realistic expenses, enter only unlogged spending; transactions are added by their dates. Amounts are in USD with up to two decimal places.")
+                Text("Enter income, savings, and spending for the selected section only. Home shows the current pay period; History and the graph combine every section into one month. Under Realistic expenses, enter only unlogged spending; transactions are added by their dates. Amounts are in USD with up to two decimal places.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -1846,7 +2052,17 @@ struct SettingsView: View {
             } header: {
                 Text("Budget periods")
             } footer: {
-                Text("Choose one, two, or four pay dates for this month. Your budget sections follow that schedule; Home and the graph always show combined monthly totals.")
+                Text("Choose one, two, or four pay dates for this month. Your budget sections follow that schedule. Home shows the current pay period; Trends combines sections into monthly totals.")
+            }
+
+            Section {
+                NavigationLink("Savings buckets") {
+                    SavingsBucketsView(store: store)
+                }
+            } header: {
+                Text("Savings goals")
+            } footer: {
+                Text("Save for big purchases. Active buckets appear on Home and add separate contribution fields to Budget.")
             }
 
             Section {
@@ -2321,6 +2537,7 @@ struct BudgetInputCard: View {
     @Binding var plan: BudgetPlan
     let color: Color
     var reportedTransactions: [ReportedExpense]? = nil
+    var savingsBuckets: [SavingsBucket] = []
 
     var body: some View {
         let transactions = reportedTransactions ?? []
@@ -2351,7 +2568,8 @@ struct BudgetInputCard: View {
             Divider()
             Text("Savings").font(.headline)
             MoneyInputRow(name: "Set aside", amount: $plan.savings)
-            MoneyInputRow(name: "Pull from savings", amount: $plan.savingsWithdrawn)
+            SavingsBucketInputs(plan: $plan, buckets: savingsBuckets,
+                                isRealistic: reportedTransactions != nil)
             Divider()
             if !summary.hasInvalidAmounts {
                 TotalRow(title: "Remaining", amount: summary.remaining, bold: true)

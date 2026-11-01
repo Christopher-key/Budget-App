@@ -19,7 +19,7 @@ enum ExcelExportError: LocalizedError {
 }
 
 enum ExcelBudgetExport {
-    static let schemaVersion = 2
+    static let schemaVersion = 3
     private static let maximumBytes = 32 * 1_024 * 1_024
     // Excel numeric cells have 15 significant digits. Reject larger amounts
     // rather than silently losing financial cents in the exported workbook.
@@ -34,6 +34,9 @@ enum ExcelBudgetExport {
               months.reduce(0, { $0 + $1.transactions.count }) <= 100_000,
               months.reduce(0, { subtotal, month in
                   subtotal + month.periods.reduce(0, { $0 + $1.realistic.expenses.count + $1.budgeted.expenses.count })
+              }) <= 100_000,
+              months.reduce(0, { subtotal, month in
+                  subtotal + month.periods.reduce(0, { $0 + $1.realistic.bucketEntries.count + $1.budgeted.bucketEntries.count })
               }) <= 100_000 else {
             throw ExcelExportError.tooLarge
         }
@@ -60,6 +63,10 @@ enum ExcelBudgetExport {
         ])
         var transactions = Sheet(name: "Transactions", headers:
             ["Date", "Month", "Period", "Category", "Amount"] + (includeNotes ? ["Notes"] : []))
+        var savingsBuckets = Sheet(name: "Savings Buckets", headers: [
+            "Month", "Period", "Start Day", "End Day", "Plan", "Bucket",
+            "Contribution", "Withdrawal", "NetContribution"
+        ])
 
         for month in ordered {
             try Task.checkCancellation()
@@ -95,9 +102,19 @@ enum ExcelBudgetExport {
                         window.payDay.map { .number(Decimal($0)) } ?? .blank, .text(name),
                         rawMoney(plan.payroll), rawMoney(plan.extra), .money(value.totalIncome),
                         .money(plan.totalExpenses), .money(reportedTotal), .money(value.totalExpenses),
-                        rawMoney(plan.savings), rawMoney(plan.savingsWithdrawn),
+                        savingsCell(plan, withdrawals: false), savingsCell(plan, withdrawals: true),
                         .money(value.totalSavings - value.totalWithdrawn), .money(value.remaining)
                     ])
+                    // Only funding recorded inside the selected periods is
+                    // exported. Global goal targets/progress and UUIDs stay local.
+                    for entry in plan.bucketEntries where hasInput(entry.contribution) || hasInput(entry.withdrawal) {
+                        savingsBuckets.rows.append([
+                            .text(month.id), .number(Decimal(window.index + 1)),
+                            .number(Decimal(window.startDay)), .number(Decimal(window.endDay)),
+                            .text(name), .text(entry.name), rawMoney(entry.contribution), rawMoney(entry.withdrawal),
+                            .money(moneyValue(entry.contribution) - moneyValue(entry.withdrawal))
+                        ])
+                    }
                     let known = Set(plan.expenses.map(\.name))
                         .union(includedTransactions.map(\.category))
                     let names = expenseCategories.filter { known.contains($0) }
@@ -152,6 +169,7 @@ enum ExcelBudgetExport {
             [.text("Expense Budget Remaining"), .text("Budgeted expenses minus Realistic expenses. Negative means spending exceeded the expense budget.")],
             [.text("Blank versus zero"), .text("Blank manual-input cells preserve missing entries; an entered zero is numeric 0. Calculated totals treat blank inputs as zero, matching the app.")],
             [.text("Savings Change"), .text("Recorded deposits minus withdrawals for that row's selected period only. This is not an all-time savings balance or a verified bank balance.")],
+            [.text("Savings buckets"), .text("Savings totals include General savings plus the selected periods' bucket contributions and withdrawals. When funding entries exist, the final Savings Buckets sheet shows their recorded names and amounts. Blank funding rows, internal IDs, global goal targets, and all-time progress are excluded; historical names remain as recorded. Do not add that detail sheet to summary totals again.")],
             [.text("Current month"), .text("Current-month figures are in progress, not a completed-month result.")],
             [.text("Dates"), .text("Transaction dates use the saved budget month and recorded local day, preserving pay-period allocation across timezone changes.")],
             [.text("Upcoming expenses"), .text("Budgeted categories are plans, not bill due dates or payment-status records. No due dates or recurring bills are inferred.")],
@@ -160,7 +178,8 @@ enum ExcelBudgetExport {
             [.text("External copies"), .text("This workbook is not password-encrypted. After saving or sharing it, its destination controls the copy. App reset cannot erase copies outside the app.")],
             [.text("Scope"), .text("Only the selected months are included. This report is not a backup/restore file.")]
         ]
-        return try workbook(yearlySheets(ordered) + [readMe, summary, periods, categories, transactions])
+        let bucketSheets = savingsBuckets.rows.count > 1 ? [savingsBuckets] : []
+        return try workbook(yearlySheets(ordered) + [readMe, summary, periods, categories, transactions] + bucketSheets)
     }
 
     // The presentation is based on the supplied workbook's layout, never its
@@ -240,7 +259,7 @@ enum ExcelBudgetExport {
                         let summary = BudgetSummary(plan: plan, transactions: reported)
                         sheet.rows[2][currentColumn] = rawMoney(plan.payroll)
                         sheet.rows[3][currentColumn] = rawMoney(plan.extra)
-                        sheet.rows[4][currentColumn] = rawMoney(plan.savingsWithdrawn)
+                        sheet.rows[4][currentColumn] = savingsCell(plan, withdrawals: true)
                         let logged = reported.reduce(into: [String: Decimal]()) {
                             $0[$1.category, default: .zero] += $1.amount
                         }
@@ -262,22 +281,15 @@ enum ExcelBudgetExport {
                                     let manual = manualByCategory[category] ?? .zero
                                     sheet.rows[row][currentColumn] = .money(-(manual + (logged[category] ?? .zero)))
                                 }
-                            } else if !plan.savings.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                sheet.rows[row][currentColumn] = .money(-moneyValue(plan.savings))
+                            } else {
+                                sheet.rows[row][currentColumn] = savingsCell(plan, withdrawals: false, negative: true)
                             }
                         }
                         sheet.rows[totalDueRow][currentColumn] = .money(-(summary.totalExpenses + summary.totalSavings))
                         sheet.rows[leftOverRow][currentColumn] = .money(summary.remaining)
                     }
-                    let hasActual = !transactions.isEmpty
-                        || ([actual.payroll, actual.extra, actual.savings, actual.savingsWithdrawn]
-                            + actual.expenses.map(\.amount)).contains {
-                            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        }
-                    let hasProjected = ([projected.payroll, projected.extra, projected.savings, projected.savingsWithdrawn]
-                        + projected.expenses.map(\.amount)).contains {
-                        !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    }
+                    let hasActual = !transactions.isEmpty || hasPlanInput(actual)
+                    let hasProjected = hasPlanInput(projected)
                     if hasActual && hasProjected {
                         sheet.comparisons.append(Comparison(
                             actualCell: columnName(column + 1) + String(leftOverRow + 1),
@@ -313,9 +325,21 @@ enum ExcelBudgetExport {
                 guard !plan.hasInvalidAmounts else {
                     throw ExcelExportError.invalidData("Correct invalid amounts in \(month.id) before exporting.")
                 }
-                guard plan.expenses.count <= 1_000 else { throw ExcelExportError.tooLarge }
-                for text in [plan.payroll, plan.extra, plan.savings, plan.savingsWithdrawn] + plan.expenses.map(\.amount) {
-                    try validateMoney(moneyValue(text))
+                guard plan.expenses.count <= 1_000, plan.bucketEntries.count <= 1_000 else {
+                    throw ExcelExportError.tooLarge
+                }
+                guard Set(plan.bucketEntries.map(\.id)).count == plan.bucketEntries.count,
+                      plan.bucketEntries.allSatisfy({ !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+                    throw ExcelExportError.invalidData("Correct invalid or duplicate savings bucket entries in \(month.id).")
+                }
+                let amounts = [plan.payroll, plan.extra, plan.savings, plan.savingsWithdrawn]
+                    + plan.expenses.map(\.amount)
+                    + plan.bucketEntries.flatMap { [$0.contribution, $0.withdrawal] }
+                for text in amounts {
+                    guard let amount = parsedMoney(text) else {
+                        throw ExcelExportError.invalidData("Correct invalid amounts in \(month.id) before exporting.")
+                    }
+                    try validateMoney(amount)
                 }
             }
             for transaction in month.transactions {
@@ -344,6 +368,25 @@ enum ExcelBudgetExport {
 
     private static func rawMoney(_ input: String) -> Cell {
         input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .blank : .money(moneyValue(input))
+    }
+
+    private static func hasInput(_ value: String) -> Bool {
+        !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static func hasPlanInput(_ plan: BudgetPlan) -> Bool {
+        ([plan.payroll, plan.extra, plan.savings, plan.savingsWithdrawn]
+            + plan.expenses.map(\.amount)
+            + plan.bucketEntries.flatMap { [$0.contribution, $0.withdrawal] }).contains(where: hasInput)
+    }
+
+    private static func savingsCell(_ plan: BudgetPlan, withdrawals: Bool, negative: Bool = false) -> Cell {
+        let inputs = withdrawals
+            ? [plan.savingsWithdrawn] + plan.bucketEntries.map(\.withdrawal)
+            : [plan.savings] + plan.bucketEntries.map(\.contribution)
+        guard inputs.contains(where: hasInput) else { return .blank }
+        let amount = withdrawals ? plan.totalWithdrawn : plan.totalSavings
+        return .money(negative ? -amount : amount)
     }
 
     private enum Cell {

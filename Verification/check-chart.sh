@@ -29,6 +29,8 @@ awk '
 ' "$task_source_dir/ContentView.swift" >> "$task_check_file"
 printf '\n' >> "$task_check_file"
 cat "$task_script_dir/ChartModelChecks.swift" >> "$task_check_file"
+printf '\n' >> "$task_check_file"
+cat "$task_script_dir/SavingsBucketChecks.swift" >> "$task_check_file"
 
 # The exit status is Swift's actual result; failed checks are never swallowed.
 swift "$task_check_file"

@@ -8,7 +8,7 @@ you choose to open or store the file may have its own account or license terms.
 ## Install the updated source
 
 This is a source package, not a complete Xcode project. Replace `ContentView.swift`
-and add **both** `ExcelExport.swift` and `ExcelExportUI.swift` to the same iOS app
+and add `ExcelExport.swift`, `ExcelExportUI.swift`, and `SavingsBucketsUI.swift` to the same iOS app
 target. When dragging them into Xcode, select the app under **Add to targets**.
 Keep the existing `@main` app entry point. Do not add `Verification/` to the target.
 Requires the existing iOS 16+/Xcode 15+ SwiftUI setup.
@@ -21,7 +21,7 @@ Requires the existing iOS 16+/Xcode 15+ SwiftUI setup.
 If Xcode cannot find `MonthlyBudget`, `LocalPreferences`, `BudgetStore`, or
 `AppLockStore`, confirm that the complete `ContentView.swift` is installed. All
 four types are defined there at module scope; replacing only the `ContentView`
-view declaration does not install the models. Then select each of the three
+view declaration does not install the models. Then select each of the four
 app Swift files, open the File Inspector with **Option-Command-1**, and check the
 same app under **Target Membership**. Choose **Product → Clean Build Folder**
 (Shift-Command-K), then **Command-B**. Remaining diagnostics may be cascading;
@@ -54,11 +54,18 @@ workbook and does not password-encrypt the exported copy.
 | Pay Periods | Payroll, Extra, income, expenses, savings deposits/withdrawals, and remaining for each section |
 | Categories | Manual and logged amounts by category, plan, month, and pay period |
 | Transactions | Recorded date, month, pay period, category, amount, and optional notes |
+| Savings Buckets (when selected records contain bucket entries) | Per-period contributions, withdrawals, and net funding, separated by plan |
 
 All amounts use the app's USD convention. Monetary values are numeric cells with
 two decimal places; text uses literal string cells rather than executable formulas.
 Blank manual fields remain blank in detail sheets; explicitly entered zero stays
 numeric zero. Computed totals treat blanks as zero, matching the app.
+
+Savings totals include general Set aside and additional bucket contributions,
+minus the appropriate withdrawals, without counting funding twice. The optional
+Savings Buckets sheet shows only selected-period entries and historical names;
+internal IDs, global goal targets, and all-time progress are not exported. An export
+with no selected bucket entries has no additional sheet.
 
 ### Layout based on the CY26 Data reference
 
@@ -173,7 +180,7 @@ The existing GitHub Mac workflow now runs these two verification scripts instead
 of `swift build`/`swift test`, which require a Swift package this repository does
 not contain. A workflow configuration is not proof that a run passed; check its
 result on GitHub. UIKit sharing and real Excel rendering still require device tests.
-The same Mac job also type-checks the three app Swift files against the iPhone
+The same Mac job also type-checks the four app Swift files against the iPhone
 simulator SDK; that check does not exercise storage, sharing, or rendered screens.
 
 Before using real records, exercise save/open in Excel, wrong codes and relaunch,

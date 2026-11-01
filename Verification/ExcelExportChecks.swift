@@ -227,6 +227,91 @@ parkingTransaction.amount = excelDecimal("0.25")
 unknownCategory.transactions.append(parkingTransaction)
 let unknownCategoryWorkbook = try ExcelBudgetExport.make(months: [unknownCategory], includeNotes: false,
                                                         createdAt: excelCreationDate)
+
+// Bucket fixtures contain synthetic names and amounts, never real goal records.
+let excelBucketID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+let excelBucketName = "=HYPERLINK(\"x\",\"BUCKET-LITERAL-NAME & <😀>\")"
+var fundedBucket = excelMonth
+fundedBucket.periods[0].budgeted.bucketEntries = [
+    BucketSavingsEntry(id: excelBucketID, name: excelBucketName,
+                       contribution: excelInput("40"), withdrawal: excelInput("3"))
+]
+fundedBucket.periods[0].realistic.bucketEntries = [
+    BucketSavingsEntry(id: excelBucketID, name: excelBucketName,
+                       contribution: excelInput("25"), withdrawal: excelInput("5"))
+]
+let fundedBucketBefore = try excelEncoder.encode(fundedBucket)
+let fundedBucketWorkbook = try ExcelBudgetExport.make(months: [fundedBucket], includeNotes: false,
+                                                      createdAt: excelCreationDate)
+let fundedBucketAfter = try excelEncoder.encode(fundedBucket)
+checkExcel(fundedBucketBefore == fundedBucketAfter,
+           "Exporting bucket funding leaves the source ledger unchanged")
+checkExcel(containsExcelBytes(fundedBucketWorkbook, "Savings Buckets")
+           && containsExcelBytes(fundedBucketWorkbook, "BUCKET-LITERAL-NAME")
+           && !containsExcelBytes(fundedBucketWorkbook, excelBucketID.uuidString),
+           "Funded buckets export names and period entries without their internal identifiers")
+
+var blankBucket = emptyMonth
+blankBucket.periods[0].realistic.bucketEntries = [
+    BucketSavingsEntry(id: excelBucketID, name: "EMPTY-BUCKET-NAME-SHOULD-NOT-EXPORT")
+]
+let blankBucketWorkbook = try ExcelBudgetExport.make(months: [blankBucket], includeNotes: false,
+                                                    createdAt: excelCreationDate)
+checkExcel(!containsExcelBytes(blankBucketWorkbook, "EMPTY-BUCKET-NAME-SHOULD-NOT-EXPORT"),
+           "Blank bucket entries expose no unused bucket names")
+
+var zeroBucket = emptyMonth
+zeroBucket.periods[0].budgeted.bucketEntries = [
+    BucketSavingsEntry(id: excelBucketID, name: "Synthetic zero bucket", contribution: excelInput("0"))
+]
+zeroBucket.periods[0].realistic.bucketEntries = zeroBucket.periods[0].budgeted.bucketEntries
+let zeroBucketWorkbook = try ExcelBudgetExport.make(months: [zeroBucket], includeNotes: false,
+                                                   createdAt: excelCreationDate)
+checkExcel(containsExcelBytes(zeroBucketWorkbook, "Synthetic zero bucket"),
+           "Explicit zero bucket funding counts as entered data")
+
+var withdrawalOnlyBucket = emptyMonth
+withdrawalOnlyBucket.periods[0].budgeted.bucketEntries = [
+    BucketSavingsEntry(id: excelBucketID, name: "Synthetic withdrawal bucket", contribution: excelInput("0"))
+]
+withdrawalOnlyBucket.periods[0].realistic.bucketEntries = [
+    BucketSavingsEntry(id: excelBucketID, name: "Synthetic withdrawal bucket", withdrawal: excelInput("5"))
+]
+let withdrawalOnlyWorkbook = try ExcelBudgetExport.make(months: [withdrawalOnlyBucket], includeNotes: false,
+                                                       createdAt: excelCreationDate)
+
+var outsideBucket = unselected
+outsideBucket.periods[0].realistic.bucketEntries = [
+    BucketSavingsEntry(id: UUID(uuidString: "ABCDEFAB-CDEF-ABCD-EFAB-CDEFABCDEFAB")!,
+                       name: "OUTSIDE-BUCKET-DO-NOT-EXPORT", contribution: excelInput("444444.44"))
+]
+let selectedWithoutBuckets = try ExcelBudgetExport.make(months: [outsideBucket, excelMonth]
+    .filter { $0.id == "2026-01" }, includeNotes: false, createdAt: excelCreationDate)
+checkExcel(!containsExcelBytes(selectedWithoutBuckets, "OUTSIDE-BUCKET-DO-NOT-EXPORT")
+           && !containsExcelBytes(selectedWithoutBuckets, "444444.44")
+           && !containsExcelBytes(selectedWithoutBuckets, outsideBucket.periods[0].realistic.bucketEntries[0].id.uuidString),
+           "Unselected bucket funding cannot leak through a selected-month export")
+
+var invalidBucket = fundedBucket
+invalidBucket.periods[0].realistic.bucketEntries[0].contribution = "invalid"
+rejectsExcel("Invalid bucket contributions block export instead of becoming zero") {
+    try ExcelBudgetExport.make(months: [invalidBucket], includeNotes: false)
+}
+invalidBucket = fundedBucket
+invalidBucket.periods[0].realistic.bucketEntries[0].withdrawal = "invalid"
+rejectsExcel("Invalid bucket withdrawals block export") {
+    try ExcelBudgetExport.make(months: [invalidBucket], includeNotes: false)
+}
+invalidBucket = fundedBucket
+invalidBucket.periods[0].realistic.bucketEntries.append(invalidBucket.periods[0].realistic.bucketEntries[0])
+rejectsExcel("Duplicate bucket entries cannot duplicate a period's funding") {
+    try ExcelBudgetExport.make(months: [invalidBucket], includeNotes: false)
+}
+invalidBucket = fundedBucket
+invalidBucket.periods[0].realistic.bucketEntries[0].name = ""
+rejectsExcel("Unnamed funded buckets block export") {
+    try ExcelBudgetExport.make(months: [invalidBucket], includeNotes: false)
+}
 let layoutSourcesBefore = try excelEncoder.encode([excelMonth, february, priorYear, unknownCategory])
 _ = try ExcelBudgetExport.make(months: [excelMonth, february, priorYear, unknownCategory]
     .filter { $0.id == "2026-02" }, includeNotes: false, createdAt: excelCreationDate)
@@ -251,4 +336,9 @@ try distinctPeriodWorkbook.write(to: excelOutputDirectory.appendingPathComponent
 try multipleMonthsWorkbook.write(to: excelOutputDirectory.appendingPathComponent("multiple-months.xlsx"))
 try multipleYearsWorkbook.write(to: excelOutputDirectory.appendingPathComponent("multiple-years.xlsx"))
 try unknownCategoryWorkbook.write(to: excelOutputDirectory.appendingPathComponent("unknown-category.xlsx"))
+try fundedBucketWorkbook.write(to: excelOutputDirectory.appendingPathComponent("funded-bucket.xlsx"))
+try blankBucketWorkbook.write(to: excelOutputDirectory.appendingPathComponent("blank-bucket.xlsx"))
+try zeroBucketWorkbook.write(to: excelOutputDirectory.appendingPathComponent("zero-bucket.xlsx"))
+try withdrawalOnlyWorkbook.write(to: excelOutputDirectory.appendingPathComponent("withdrawal-only-bucket.xlsx"))
+try selectedWithoutBuckets.write(to: excelOutputDirectory.appendingPathComponent("selected-no-buckets.xlsx"))
 print("Completed \(completedExcelChecks) export checks. Synthetic workbooks are temporary test artifacts.")
