@@ -19,7 +19,7 @@ enum ExcelExportError: LocalizedError {
 }
 
 enum ExcelBudgetExport {
-    static let schemaVersion = 1
+    static let schemaVersion = 2
     private static let maximumBytes = 32 * 1_024 * 1_024
     // Excel numeric cells have 15 significant digits. Reject larger amounts
     // rather than silently losing financial cents in the exported workbook.
@@ -139,6 +139,11 @@ enum ExcelBudgetExport {
             [.text("Report"), .text("Budget App Excel export; schema \(schemaVersion)")],
             [.text("Created (UTC)"), .text(timestamp)],
             [.text("Selected months"), .text(ordered.map(\.id).joined(separator: ", "))],
+            [.text("Calendar-year overview"), .text("CY sheets show the selected pay periods chronologically, with Projected (Budgeted), Actual (Realistic), and Line Item columns. Only selected records appear; no missing periods are fabricated.")],
+            [.text("CY outflows"), .text("Expenses and savings deposits are negative only in the CY overview. Total Due is the negative sum of expenses and savings deposits; Left Over matches the app's Remaining exactly. The detail sheets retain positive expense/deposit amounts.")],
+            [.text("CY income and withdrawals"), .text("Income is Payroll; Additional income is Extra. Row 5 is Savings withdrawals, not carryover or opening cash. No carryover amount is inferred.")],
+            [.text("CY comparison"), .text("Actual Left Over is compared with its own period's Projected Left Over: red below projection, green at or above it. Both sides need an explicit input; untouched plans have no comparison coloring. Entered zero counts as an input.")],
+            [.text("Static values"), .text("All financial totals are app-computed snapshots, not spreadsheet cell formulas. Conditional formatting only compares cells inside this workbook. Editing this copy never updates the app.")],
             [.text("Currency"), .text("USD; monetary cells show two decimal places.")],
             [.text("Snapshot"), .text("This workbook is a read-only report at export time. Editing it does not update the iPhone app.")],
             [.text("Realistic spending"), .text("Unlogged manual expenses plus reported transactions, counted once. Do not add the Categories or Transactions sheets to summary totals again.")],
@@ -155,7 +160,134 @@ enum ExcelBudgetExport {
             [.text("External copies"), .text("This workbook is not password-encrypted. After saving or sharing it, its destination controls the copy. App reset cannot erase copies outside the app.")],
             [.text("Scope"), .text("Only the selected months are included. This report is not a backup/restore file.")]
         ]
-        return try workbook([readMe, summary, periods, categories, transactions])
+        return try workbook(yearlySheets(ordered) + [readMe, summary, periods, categories, transactions])
+    }
+
+    // The presentation is based on the supplied workbook's layout, never its
+    // financial records, fixed dates, formulas, or personal comparison thresholds.
+    private static func yearlySheets(_ ordered: [MonthlyBudget]) throws -> [Sheet] {
+        let monthNames = ["January", "February", "March", "April", "May", "June",
+                          "July", "August", "September", "October", "November", "December"]
+        let years = Dictionary(grouping: ordered) { String($0.id.prefix(4)) }
+        return try years.keys.sorted().map { identifier in
+            try Task.checkCancellation()
+            let year = Int(identifier)!
+            let name = (2000...2099).contains(year)
+                ? String(format: "CY%02d Data", year % 100)
+                : String(format: "CY%04d Data", year)
+            let months = years[identifier]!.sorted { $0.id < $1.id }
+            let known = Set(expenseCategories)
+            let allNames = Set(months.flatMap { month in
+                (month.budgetedPlans + month.realisticPlans).flatMap { $0.expenses.map(\.name) }
+                    + month.transactions.map(\.category)
+            })
+            let additionalNames = allNames.subtracting(known).sorted()
+            // Nil denotes a dedicated savings-deposit line, not a category.
+            let expenseLines: [(label: String, category: String?)] = [
+                ("Home / Rent", "Home"), ("Car", "Car"), ("Insurance", "Insurance"),
+                ("Phone", "Phone"), ("Grocery / Food", "Grocery"), ("Gas", "Gas"),
+                ("Electric", "Electric"), ("Savings deposits", nil),
+                ("Credit Card", "Credit Card"), ("Misc.", "Misc."), ("Going-out", "Going-out")
+            ] + additionalNames.map { ($0, Optional($0)) }
+            let totalDueRow = 6 + expenseLines.count // Zero-based: row 18 in the standard layout.
+            let leftOverRow = totalDueRow + 1
+            let blockCount = months.reduce(0) { $0 + $1.windows.count }
+            let width = blockCount * 4
+            guard width <= 16_384, leftOverRow + 1 <= 1_048_576,
+                  width * (leftOverRow + 1) <= 200_000 else {
+                throw ExcelExportError.tooLarge
+            }
+            var sheet = Sheet(name: name, headers: [])
+            sheet.isYearlyOverview = true
+            sheet.rows = Array(repeating: Array(repeating: .blank, count: width), count: leftOverRow + 1)
+            sheet.headerRows = [0, 1, 5, totalDueRow, leftOverRow]
+            sheet.freezeRows = 2
+            sheet.columnWidths = (0..<width).map { index in
+                switch index % 4 {
+                case 0, 1: return 11
+                case 2: return 22
+                default: return 1.5
+                }
+            }
+            var block = 0
+            for month in months {
+                try Task.checkCancellation()
+                let monthNumber = Int(month.id.suffix(2))!
+                let monthName = monthNames[monthNumber - 1]
+                for window in month.windows {
+                    let column = block * 4
+                    let dateLabel = "\(monthName) \(year) · Days \(window.startDay)–\(window.endDay)"
+                    let paydayLabel = window.payDay.map { "Payday \(monthName) \($0)" } ?? "Payday not set"
+                    sheet.rows[0][column] = .text(dateLabel + " · " + paydayLabel)
+                    sheet.mergedRanges.append("\(columnName(column))1:\(columnName(column + 2))1")
+                    for row in [1, 5] {
+                        sheet.rows[row][column] = .text("Projected")
+                        sheet.rows[row][column + 1] = .text("Actual")
+                        sheet.rows[row][column + 2] = .text("Line Item")
+                    }
+                    sheet.rows[2][column + 2] = .text("Income")
+                    sheet.rows[3][column + 2] = .text("Additional income")
+                    sheet.rows[4][column + 2] = .text("Savings withdrawals")
+                    sheet.rows[totalDueRow][column + 2] = .text("Total Due")
+                    sheet.rows[leftOverRow][column + 2] = .text("Left Over")
+                    let transactions = month.transactions(in: window)
+                    let projected = month.periods[window.index].budgeted
+                    let actual = month.periods[window.index].realistic
+                    let pairs: [(BudgetPlan, [ReportedExpense])] = [(projected, []), (actual, transactions)]
+                    for (offset, pair) in pairs.enumerated() {
+                        let (plan, reported) = pair
+                        let currentColumn = column + offset
+                        let summary = BudgetSummary(plan: plan, transactions: reported)
+                        sheet.rows[2][currentColumn] = rawMoney(plan.payroll)
+                        sheet.rows[3][currentColumn] = rawMoney(plan.extra)
+                        sheet.rows[4][currentColumn] = rawMoney(plan.savingsWithdrawn)
+                        let logged = reported.reduce(into: [String: Decimal]()) {
+                            $0[$1.category, default: .zero] += $1.amount
+                        }
+                        var manualByCategory: [String: Decimal] = [:]
+                        var enteredCategories = Set<String>()
+                        for entry in plan.expenses {
+                            manualByCategory[entry.name, default: .zero] += moneyValue(entry.amount)
+                            if !entry.amount.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                enteredCategories.insert(entry.name)
+                            }
+                        }
+                        for (lineIndex, line) in expenseLines.enumerated() {
+                            let row = lineIndex + 6
+                            sheet.rows[row][column + 2] = .text(line.label)
+                            if let category = line.category {
+                                let hasManual = enteredCategories.contains(category)
+                                let hasReported = logged[category] != nil
+                                if hasManual || hasReported {
+                                    let manual = manualByCategory[category] ?? .zero
+                                    sheet.rows[row][currentColumn] = .money(-(manual + (logged[category] ?? .zero)))
+                                }
+                            } else if !plan.savings.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                sheet.rows[row][currentColumn] = .money(-moneyValue(plan.savings))
+                            }
+                        }
+                        sheet.rows[totalDueRow][currentColumn] = .money(-(summary.totalExpenses + summary.totalSavings))
+                        sheet.rows[leftOverRow][currentColumn] = .money(summary.remaining)
+                    }
+                    let hasActual = !transactions.isEmpty
+                        || ([actual.payroll, actual.extra, actual.savings, actual.savingsWithdrawn]
+                            + actual.expenses.map(\.amount)).contains {
+                            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        }
+                    let hasProjected = ([projected.payroll, projected.extra, projected.savings, projected.savingsWithdrawn]
+                        + projected.expenses.map(\.amount)).contains {
+                        !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    }
+                    if hasActual && hasProjected {
+                        sheet.comparisons.append(Comparison(
+                            actualCell: columnName(column + 1) + String(leftOverRow + 1),
+                            projectedCell: columnName(column) + String(leftOverRow + 1)))
+                    }
+                    block += 1
+                }
+            }
+            return sheet
+        }
     }
 
     private static func validate(_ months: [MonthlyBudget]) throws {
@@ -218,9 +350,21 @@ enum ExcelBudgetExport {
         case text(String), money(Decimal), number(Decimal), blank
     }
 
+    private struct Comparison {
+        let actualCell: String
+        let projectedCell: String
+    }
+
     private struct Sheet {
         let name: String
         var rows: [[Cell]]
+        var isYearlyOverview = false
+        var headerRows: Set<Int> = [0]
+        var columnWidths: [Double]? = nil
+        var mergedRanges: [String] = []
+        var comparisons: [Comparison] = []
+        var freezeRows = 1
+
         init(name: String, headers: [String]) {
             self.name = name
             rows = [headers.map { .text($0) }]
@@ -246,26 +390,50 @@ enum ExcelBudgetExport {
             "<Relationship Id=\"rId\($0 + 1)\" Type=\"\(relationshipNS)/worksheet\" Target=\"worksheets/sheet\($0 + 1).xml\"/>"
         }.joined()
         try archive.add("xl/_rels/workbook.xml.rels", text: xmlHeader + "<Relationships xmlns=\"\(packageNS)\">" + sheetRelationships + "<Relationship Id=\"rId\(sheets.count + 1)\" Type=\"\(relationshipNS)/styles\" Target=\"styles.xml\"/></Relationships>")
-        try archive.add("xl/styles.xml", text: xmlHeader + "<styleSheet xmlns=\"\(spreadsheetNS)\"><numFmts count=\"1\"><numFmt numFmtId=\"164\" formatCode=\"#,##0.00;[Red]-#,##0.00\"/></numFmts><fonts count=\"2\"><font><sz val=\"11\"/><name val=\"Calibri\"/></font><font><b/><sz val=\"11\"/><name val=\"Calibri\"/></font></fonts><fills count=\"2\"><fill><patternFill patternType=\"none\"/></fill><fill><patternFill patternType=\"gray125\"/></fill></fills><borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs><cellXfs count=\"3\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/><xf numFmtId=\"0\" fontId=\"1\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/><xf numFmtId=\"164\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/></cellXfs><cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles></styleSheet>")
+        try archive.add("xl/styles.xml", text: xmlHeader + stylesXML(namespace: spreadsheetNS))
         for (sheetIndex, sheet) in sheets.enumerated() {
             try Task.checkCancellation()
             guard sheet.rows.count <= 1_048_576 else { throw ExcelExportError.tooLarge }
             let columnCount = sheet.rows.first?.count ?? 1
+            guard (1...16_384).contains(columnCount) else { throw ExcelExportError.tooLarge }
             let lastCell = columnName(columnCount - 1) + String(sheet.rows.count)
-            var document = xmlHeader + "<worksheet xmlns=\"\(spreadsheetNS)\"><dimension ref=\"A1:\(lastCell)\"/><sheetViews><sheetView workbookViewId=\"0\"><pane ySplit=\"1\" topLeftCell=\"A2\" activePane=\"bottomLeft\" state=\"frozen\"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight=\"15\"/><cols><col min=\"1\" max=\"\(columnCount)\" width=\"22\" customWidth=\"1\"/></cols><sheetData>"
+            var document = xmlHeader + "<worksheet xmlns=\"\(spreadsheetNS)\"><dimension ref=\"A1:\(lastCell)\"/><sheetViews><sheetView workbookViewId=\"0\">"
+            if sheet.freezeRows > 0 {
+                document += "<pane ySplit=\"\(sheet.freezeRows)\" topLeftCell=\"A\(sheet.freezeRows + 1)\" activePane=\"bottomLeft\" state=\"frozen\"/>"
+            }
+            document += "</sheetView></sheetViews><sheetFormatPr defaultRowHeight=\"\(sheet.isYearlyOverview ? 18 : 15)\"/><cols>"
+            if let widths = sheet.columnWidths {
+                for (index, width) in widths.enumerated() {
+                    document += "<col min=\"\(index + 1)\" max=\"\(index + 1)\" width=\"\(width)\" customWidth=\"1\"/>"
+                }
+            } else {
+                document += "<col min=\"1\" max=\"\(columnCount)\" width=\"22\" customWidth=\"1\"/>"
+            }
+            document += "</cols><sheetData>"
             for (rowIndex, row) in sheet.rows.enumerated() {
                 if rowIndex % 256 == 0 { try Task.checkCancellation() }
-                document += "<row r=\"\(rowIndex + 1)\">"
+                let header = sheet.headerRows.contains(rowIndex)
+                let height = sheet.isYearlyOverview && header
+                    ? " ht=\"\(rowIndex == 0 ? 42 : 22)\" customHeight=\"1\"" : ""
+                document += "<row r=\"\(rowIndex + 1)\"\(height)>"
                 for (column, cell) in row.enumerated() {
                     let reference = columnName(column) + String(rowIndex + 1)
                     switch cell {
-                    case .blank: break
+                    case .blank:
+                        if sheet.isYearlyOverview && header && column % 4 != 3 {
+                            document += "<c r=\"\(reference)\" s=\"5\"/>"
+                        }
                     case .text(let value):
-                        document += "<c r=\"\(reference)\" t=\"inlineStr\" s=\"\(rowIndex == 0 ? 1 : 0)\"><is><t xml:space=\"preserve\">\(try xml(value))</t></is></c>"
+                        let style = sheet.isYearlyOverview ? (header ? 5 : 3) : (header ? 1 : 0)
+                        document += "<c r=\"\(reference)\" t=\"inlineStr\" s=\"\(style)\"><is><t xml:space=\"preserve\">\(try xml(value))</t></is></c>"
                     case .money(let value), .number(let value):
                         try validateMoney(value)
                         let style: Int
-                        if case .money = cell { style = 2 } else { style = 0 }
+                        if sheet.isYearlyOverview {
+                            if case .money = cell { style = header ? 6 : 4 } else { style = header ? 5 : 3 }
+                        } else {
+                            if case .money = cell { style = 2 } else { style = 0 }
+                        }
                         document += "<c r=\"\(reference)\" s=\"\(style)\"><v>\(NSDecimalNumber(decimal: value).stringValue)</v></c>"
                     }
                 }
@@ -273,13 +441,38 @@ enum ExcelBudgetExport {
                 if document.utf8.count > maximumBytes { throw ExcelExportError.tooLarge }
             }
             document += "</sheetData>"
-            if sheet.rows.count > 1 && sheet.name != "Read Me" {
+            if !sheet.isYearlyOverview && sheet.rows.count > 1 && sheet.name != "Read Me" {
                 document += "<autoFilter ref=\"A1:\(lastCell)\"/>"
+            }
+            if !sheet.mergedRanges.isEmpty {
+                document += "<mergeCells count=\"\(sheet.mergedRanges.count)\">"
+                for range in sheet.mergedRanges { document += "<mergeCell ref=\"\(range)\"/>" }
+                document += "</mergeCells>"
+            }
+            for (index, comparison) in sheet.comparisons.enumerated() {
+                document += "<conditionalFormatting sqref=\"\(comparison.actualCell)\"><cfRule type=\"cellIs\" dxfId=\"0\" priority=\"\(index * 2 + 1)\" operator=\"lessThan\"><formula>\(comparison.projectedCell)</formula></cfRule><cfRule type=\"cellIs\" dxfId=\"1\" priority=\"\(index * 2 + 2)\" operator=\"greaterThanOrEqual\"><formula>\(comparison.projectedCell)</formula></cfRule></conditionalFormatting>"
             }
             document += "</worksheet>"
             try archive.add("xl/worksheets/sheet\(sheetIndex + 1).xml", text: document)
         }
         return try archive.finish()
+    }
+
+    private static func stylesXML(namespace: String) -> String {
+        // Styles 0–2 retain the original detail-table definitions. Styles 3–6
+        // apply only to the calendar-year layout and use Calibri 12, centered.
+        """
+        <styleSheet xmlns="\(namespace)">
+        <numFmts count="1"><numFmt numFmtId="164" formatCode="#,##0.00;[Red]-#,##0.00"/></numFmts>
+        <fonts count="4"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font><font><sz val="12"/><name val="Calibri"/></font><font><b/><sz val="12"/><name val="Calibri"/></font></fonts>
+        <fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFF2CC"/><bgColor indexed="64"/></patternFill></fill></fills>
+        <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+        <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+        <cellXfs count="7"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf><xf numFmtId="2" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1" applyNumberFormat="1"><alignment horizontal="center" vertical="center"/></xf><xf numFmtId="0" fontId="3" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf><xf numFmtId="2" fontId="3" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1" applyNumberFormat="1"><alignment horizontal="center" vertical="center"/></xf></cellXfs>
+        <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+        <dxfs count="2"><dxf><fill><patternFill patternType="solid"><fgColor rgb="FFFFC7CE"/><bgColor indexed="64"/></patternFill></fill></dxf><dxf><fill><patternFill patternType="solid"><fgColor rgb="FFC5E0B4"/><bgColor indexed="64"/></patternFill></fill></dxf></dxfs>
+        </styleSheet>
+        """
     }
 
     private static func columnName(_ index: Int) -> String {

@@ -9,8 +9,8 @@ are included.
 
 - Read-only Home with time-of-day greeting, a compact monthly-remaining summary,
   larger current-pay-period breakdowns, and cumulative savings.
-- A Home warning when current-pay-period Realistic expenses reach 70% of the
-  Budgeted expense limit, with a red warning at or above the full limit.
+- A compact Home warning listing expense categories that have used at least 70%
+  of their own current-pay-period budgets, with the amount left for each category.
 - Monthly, Bi-Weekly, or Weekly pay schedules with one, two, or four selected
   calendar dates for the current month.
 - Matching editable budget sections for Payroll, Extra, savings deposits and
@@ -23,6 +23,8 @@ are included.
 - Optional four-digit local screen lock and confirmed destructive reset.
 - Local Excel `.xlsx` exports with selected months, optional notes, fresh passcode
   verification, and metadata-only export history in Settings.
+- Template-style annual Excel sheets with side-by-side Projected/Actual pay-period
+  blocks, plus the existing monthly, category, and transaction detail sheets.
 - App-local, backup-excluded storage; no Keychain, server, analytics, or automatic uploads.
 
 ## Open in Xcode
@@ -54,6 +56,12 @@ See [Excel export instructions](EXCEL-EXPORT.md) for workbook sheets, security,
 verification, and limits. No ChatGPT/API connection, hosting, or Microsoft sign-in
 is needed. A destination you select may upload its copy; exports are not encrypted
 with your app passcode, and reset cannot delete copies outside the app.
+
+The annual sheets follow the supplied CY26 Data layout: merged date headings,
+pale-yellow headers, three-column pay-period blocks, and signed cash outflows.
+They are generated from app records; the private reference workbook is not included.
+Savings withdrawals replace its automatic carryover line so totals retain the
+app's meaning. The export instructions explain the matched and adapted features.
 
 ## Pay dates and budget sections
 
@@ -87,14 +95,17 @@ in section order. Adding sections starts them blank; reducing sections merges
 removed values into the last retained section, preserving monthly totals. Older
 monthly-only records migrate into the first section with additional sections blank.
 
-Home's warning compares only the current section's expenses: manual Realistic
-spending plus logged transactions against that section's Budgeted expenses.
-At 70% spent (30% left), an orange banner appears above the summaries; reaching
-or exceeding the limit turns it red. Income, savings, other pay periods, and other
-months do not affect this expense comparison. An untouched or invalid expense
-budget does not produce a misleading warning. An explicitly entered zero budget
-with positive spending shows an exceeded warning. The banner adds no timer,
-notification service, or network call and changes no stored records.
+Home's warning compares each category's current-period manual Realistic spending
+plus its logged transactions against that category's Budgeted amount. It shows
+only the title and qualifying lines such as **Electric budget left: $30.00**.
+At 70% spent (30% left), that category appears; fully used or exceeded categories
+show red amounts, with negative remaining amounts indicating overspending. The
+banner turns red when any listed category reaches or exceeds its limit. It can
+warn about one category even while the overall period is under budget.
+Income, savings, other pay periods, and other months do not affect the comparison.
+An untouched or invalid category is skipped; valid warnings for other categories
+still appear. An explicitly entered zero budget with positive spending qualifies.
+The banner adds no timer, notification service, or network call and changes no records.
 
 ## Graph calculation
 

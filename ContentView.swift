@@ -551,55 +551,84 @@ struct BudgetSummary {
 
 // MARK: - Current pay-period expense warning
 
-struct PayPeriodBudgetWarning {
+struct PayPeriodBudgetWarning: Identifiable {
     enum Level: Equatable { case approaching, reached, exceeded }
 
+    let category: String
     let level: Level
     let budgetedExpenses: Decimal
     let realisticExpenses: Decimal
 
+    var id: String { category }
     var remaining: Decimal { budgetedExpenses - realisticExpenses }
 
     static func evaluate(budgeted: BudgetPlan, realistic: BudgetPlan,
-                         transactions: [ReportedExpense] = []) -> PayPeriodBudgetWarning? {
-        // An untouched budget is unknown. Explicitly entered zero is a real limit.
-        guard budgeted.expenses.contains(where: {
-            !$0.amount.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }) else { return nil }
-
-        func expenses(in plan: BudgetPlan) -> Decimal? {
-            var total = Decimal.zero
+                         transactions: [ReportedExpense] = []) -> [PayPeriodBudgetWarning] {
+        func expenses(in plan: BudgetPlan) -> [String: CategoryAmount] {
+            var totals: [String: CategoryAmount] = [:]
             for entry in plan.expenses {
-                guard let amount = parsedMoney(entry.amount), !amount.isNaN,
-                      amount >= .zero else { return nil }
-                total += amount
+                var value = totals[entry.name] ?? CategoryAmount()
+                if !entry.amount.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    value.hasInput = true
+                }
+                if let amount = parsedMoney(entry.amount), !amount.isNaN, amount >= .zero {
+                    value.amount += amount
+                    if value.amount.isNaN { value.isValid = false }
+                } else {
+                    value.isValid = false
+                }
+                totals[entry.name] = value
             }
-            return total.isNaN ? nil : total
+            return totals
         }
 
-        guard let limit = expenses(in: budgeted),
-              let manual = expenses(in: realistic) else { return nil }
-        var spent = manual
+        let limits = expenses(in: budgeted)
+        let manual = expenses(in: realistic)
+        var logged: [String: Decimal] = [:]
+        var invalidLoggedCategories = Set<String>()
         for transaction in transactions {
-            guard !transaction.amount.isNaN, transaction.amount > .zero else { return nil }
-            spent += transaction.amount
+            guard !transaction.amount.isNaN, transaction.amount > .zero else {
+                invalidLoggedCategories.insert(transaction.category)
+                continue
+            }
+            let total = (logged[transaction.category] ?? .zero) + transaction.amount
+            if total.isNaN { invalidLoggedCategories.insert(transaction.category) }
+            logged[transaction.category] = total
         }
-        guard !spent.isNaN else { return nil }
 
-        let level: Level
-        if spent > limit {
-            level = .exceeded
-        } else if limit > .zero && spent == limit {
-            level = .reached
-        } else {
-            guard limit > .zero else { return nil }
-            // Decimal comparisons preserve the exact 70% boundary, including cents.
-            let threshold = limit * Decimal(7) / Decimal(10)
-            guard !threshold.isNaN, spent >= threshold else { return nil }
-            level = .approaching
+        let names = expenseCategories.filter { limits[$0] != nil }
+            + limits.keys.filter { !expenseCategories.contains($0) }.sorted()
+        return names.compactMap { category -> PayPeriodBudgetWarning? in
+            // A blank category budget is unknown; an entered zero is a real limit.
+            guard let limit = limits[category], limit.hasInput, limit.isValid,
+                  !invalidLoggedCategories.contains(category) else { return nil }
+            let unlogged = manual[category] ?? CategoryAmount()
+            guard unlogged.isValid else { return nil }
+            let spent = unlogged.amount + (logged[category] ?? .zero)
+            guard !spent.isNaN else { return nil }
+
+            let level: Level
+            if spent > limit.amount {
+                level = .exceeded
+            } else if limit.amount > .zero && spent == limit.amount {
+                level = .reached
+            } else {
+                guard limit.amount > .zero else { return nil }
+                // Compare exact cents before formatting any display values.
+                let threshold = limit.amount * Decimal(7) / Decimal(10)
+                guard !threshold.isNaN, spent >= threshold else { return nil }
+                level = .approaching
+            }
+            return PayPeriodBudgetWarning(category: category, level: level,
+                                          budgetedExpenses: limit.amount,
+                                          realisticExpenses: spent)
         }
-        return PayPeriodBudgetWarning(level: level, budgetedExpenses: limit,
-                                      realisticExpenses: spent)
+    }
+
+    private struct CategoryAmount {
+        var amount = Decimal.zero
+        var hasInput = false
+        var isValid = true
     }
 }
 
@@ -1222,11 +1251,13 @@ struct HomeView: View {
 
                     // The store may still be rolling over immediately after midnight.
                     if month.id == BudgetStore.monthID(for: context.date),
-                       let window = window, let period = period,
-                       let warning = PayPeriodBudgetWarning.evaluate(
-                        budgeted: period.budgeted, realistic: period.realistic,
-                        transactions: transactions) {
-                        PayPeriodWarningBanner(warning: warning, periodTitle: window.title)
+                       let period = period {
+                        let warnings = PayPeriodBudgetWarning.evaluate(
+                            budgeted: period.budgeted, realistic: period.realistic,
+                            transactions: transactions)
+                        if !warnings.isEmpty {
+                            PayPeriodWarningBanner(warnings: warnings)
+                        }
                     }
 
                     MonthlyRemainingCard(month: month)
@@ -1262,17 +1293,10 @@ struct HomeView: View {
 }
 
 struct PayPeriodWarningBanner: View {
-    let warning: PayPeriodBudgetWarning
-    let periodTitle: String
+    let warnings: [PayPeriodBudgetWarning]
 
-    private var color: Color { warning.level == .approaching ? .orange : .red }
-
-    private var title: String {
-        switch warning.level {
-        case .approaching: return "Budget warning — 30% or less left"
-        case .reached: return "Pay-period expense budget reached"
-        case .exceeded: return "Pay-period expense budget exceeded"
-        }
+    private var color: Color {
+        warnings.contains { $0.level != .approaching } ? .red : .orange
     }
 
     var body: some View {
@@ -1281,27 +1305,25 @@ struct PayPeriodWarningBanner: View {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(color)
                     .accessibilityHidden(true)
-                Text(title).font(.headline)
+                Text("Pay-period budget warning").font(.headline)
             }
-            Text("Current pay period • Days \(periodTitle)")
+            ForEach(warnings) { warning in
+                HStack {
+                    Text("\(warning.category) budget left")
+                    Spacer()
+                    Text(warning.remaining, format: .currency(code: "USD"))
+                        .foregroundStyle(warning.level == .approaching ? Color.primary : Color.red)
+                        .fontWeight(.bold)
+                }
                 .font(.subheadline)
-            Text("Realistic expenses: \(warning.realisticExpenses.formatted(.currency(code: "USD"))) of \(warning.budgetedExpenses.formatted(.currency(code: "USD"))) budgeted.")
-                .font(.subheadline)
-            HStack {
-                Text(warning.level == .exceeded ? "Over budget by" : "Expense budget left")
-                Spacer()
-                Text(warning.level == .exceeded ? -warning.remaining : warning.remaining,
-                     format: .currency(code: "USD"))
-                    .foregroundStyle(warning.level == .approaching ? Color.primary : Color.red)
-                    .fontWeight(.bold)
+                .accessibilityElement(children: .combine)
             }
-            .font(.subheadline)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
         .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(color.opacity(0.5), lineWidth: 1))
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
     }
 }
 

@@ -180,6 +180,11 @@ rejectsExcel("Amounts beyond Excel's exact-cent precision are rejected") {
 let emptyMonth = MonthlyBudget(id: "2026-02", date: excelDate(2026, 2, 1))
 let emptyWorkbook = try ExcelBudgetExport.make(months: [emptyMonth], includeNotes: false,
                                               createdAt: excelCreationDate)
+var explicitZero = emptyMonth
+explicitZero.periods[0].budgeted.payroll = excelInput("0")
+explicitZero.periods[0].realistic.payroll = excelInput("0")
+let explicitZeroWorkbook = try ExcelBudgetExport.make(months: [explicitZero], includeNotes: false,
+                                                     createdAt: excelCreationDate)
 var monthly = excelMonth
 checkExcel(monthly.applyPaySchedule(PaySchedule(frequency: .monthly, days: [10])),
            "Synthetic monthly schedule is valid")
@@ -190,9 +195,60 @@ checkExcel(weekly.applyPaySchedule(PaySchedule(frequency: .weekly, days: [1, 8, 
            "Synthetic weekly schedule is valid")
 let weeklyWorkbook = try ExcelBudgetExport.make(months: [weekly], includeNotes: false,
                                                createdAt: excelCreationDate)
+
+// Calendar-year layouts use only synthetic records, never the user's template data.
+var distinctPeriod = excelMonth
+distinctPeriod.periods[1].budgeted.payroll = excelInput("800")
+let distinctPeriodWorkbook = try ExcelBudgetExport.make(months: [distinctPeriod], includeNotes: false,
+                                                       createdAt: excelCreationDate)
+var february = MonthlyBudget(id: "2026-02", date: excelDate(2026, 2, 1))
+february.periods[0].realistic.payroll = excelInput("70")
+february.periods[0].realistic.savingsWithdrawn = excelInput("3")
+february.periods[0].realistic.expenses[0].amount = excelInput("5")
+february.periods[1].realistic.payroll = excelInput("90")
+february.periods[1].realistic.savings = excelInput("4")
+let multipleMonthsWorkbook = try ExcelBudgetExport.make(months: [february, excelMonth], includeNotes: false,
+                                                       createdAt: excelCreationDate)
+var priorYear = MonthlyBudget(id: "2025-12", date: excelDate(2025, 12, 1))
+priorYear.periods[0].budgeted.payroll = excelInput("42")
+priorYear.periods[0].realistic.payroll = excelInput("40")
+priorYear.periods[0].realistic.expenses[0].amount = excelInput("1.25")
+let multipleYearsWorkbook = try ExcelBudgetExport.make(months: [excelMonth, priorYear], includeNotes: false,
+                                                      createdAt: excelCreationDate)
+var unknownCategory = excelMonth
+unknownCategory.periods[0].budgeted.expenses.append(
+    ExpenseEntry(name: "Parking", amount: excelInput("7.50")))
+unknownCategory.periods[0].realistic.expenses.append(
+    ExpenseEntry(name: "Parking", amount: excelInput("2.50")))
+var parkingTransaction = ReportedExpense()
+parkingTransaction.date = excelDate(2026, 1, 3)
+parkingTransaction.category = "Parking"
+parkingTransaction.amount = excelDecimal("0.25")
+unknownCategory.transactions.append(parkingTransaction)
+let unknownCategoryWorkbook = try ExcelBudgetExport.make(months: [unknownCategory], includeNotes: false,
+                                                        createdAt: excelCreationDate)
+let layoutSourcesBefore = try excelEncoder.encode([excelMonth, february, priorYear, unknownCategory])
+_ = try ExcelBudgetExport.make(months: [excelMonth, february, priorYear, unknownCategory]
+    .filter { $0.id == "2026-02" }, includeNotes: false, createdAt: excelCreationDate)
+let layoutSourcesAfter = try excelEncoder.encode([excelMonth, february, priorYear, unknownCategory])
+checkExcel(layoutSourcesAfter == layoutSourcesBefore,
+           "Calendar-year layout generation leaves all source budgets untouched")
+checkExcel(containsExcelBytes(multipleYearsWorkbook, "CY25 Data")
+           && containsExcelBytes(multipleYearsWorkbook, "CY26 Data"),
+           "Every selected calendar year gets its own overview sheet")
+checkExcel(containsExcelBytes(multipleMonthsWorkbook, "February 2026")
+           && !containsExcelBytes(withoutNotes, "February 2026"),
+           "Overview date blocks include selected months only")
+checkExcel(containsExcelBytes(unknownCategoryWorkbook, "Parking"),
+           "Unknown expense categories remain visible in calendar-year layouts")
 try withoutNotes.write(to: excelOutputDirectory.appendingPathComponent("without-notes.xlsx"))
 try withNotes.write(to: excelOutputDirectory.appendingPathComponent("with-notes.xlsx"))
 try emptyWorkbook.write(to: excelOutputDirectory.appendingPathComponent("empty-month.xlsx"))
+try explicitZeroWorkbook.write(to: excelOutputDirectory.appendingPathComponent("explicit-zero.xlsx"))
 try monthlyWorkbook.write(to: excelOutputDirectory.appendingPathComponent("monthly.xlsx"))
 try weeklyWorkbook.write(to: excelOutputDirectory.appendingPathComponent("weekly.xlsx"))
+try distinctPeriodWorkbook.write(to: excelOutputDirectory.appendingPathComponent("distinct-period.xlsx"))
+try multipleMonthsWorkbook.write(to: excelOutputDirectory.appendingPathComponent("multiple-months.xlsx"))
+try multipleYearsWorkbook.write(to: excelOutputDirectory.appendingPathComponent("multiple-years.xlsx"))
+try unknownCategoryWorkbook.write(to: excelOutputDirectory.appendingPathComponent("unknown-category.xlsx"))
 print("Completed \(completedExcelChecks) export checks. Synthetic workbooks are temporary test artifacts.")

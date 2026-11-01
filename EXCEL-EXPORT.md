@@ -48,6 +48,7 @@ workbook and does not password-encrypt the exported copy.
 
 | Sheet | Contents |
 | --- | --- |
+| CY26 Data, CY27 Data, etc. | Selected pay periods laid out side by side, following the supplied CY26 Data reference |
 | Read Me | Scope, creation time, currency, calculations, and limitations |
 | Monthly Summary | Budgeted/Realistic income, spending, savings, remaining, and spending variance |
 | Pay Periods | Payroll, Extra, income, expenses, savings deposits/withdrawals, and remaining for each section |
@@ -58,6 +59,49 @@ All amounts use the app's USD convention. Monetary values are numeric cells with
 two decimal places; text uses literal string cells rather than executable formulas.
 Blank manual fields remain blank in detail sheets; explicitly entered zero stays
 numeric zero. Computed totals treat blanks as zero, matching the app.
+
+### Layout based on the CY26 Data reference
+
+The first sheet for each selected calendar year presents horizontal pay-period
+blocks: **Projected / Actual / Line Item**, followed by a narrow spacer. Projected
+means the app's Budgeted plan; Actual means its Realistic plan, including manual
+spending plus logged transactions. Only selected months appear. Dates and period
+counts come from the app's saved Monthly, Bi-Weekly, or Weekly schedule rather
+than a fixed set of dates copied from the reference.
+
+| Reference feature | Export treatment |
+| --- | --- |
+| Merged date headings and repeated three-column blocks | Recreated for each exported pay period |
+| Pale-yellow headers, Calibri 12, centered values, two decimals, narrow spacers | Recreated with native Excel styles |
+| Income, additional income, expenses, savings, Total Due, Left Over | Mapped to the app's fields and current calculations |
+| Negative expense and savings outflows | Shown as negative in CY overview sheets; detailed sheets keep positive spending amounts |
+| Red/green Left Over comparisons | Compare Actual with Projected in the same period when both have entered data |
+| Automatic cumulative savings carryover | Replaced with the app's explicit Savings withdrawals; no assumed carry-forward |
+| Hand-colored paid/status markers and comments | Not inferred or copied; the app has no paid/unpaid field |
+| Separate secured/unsecured debt accounts | Not invented; existing Credit Card, Car, and other app categories remain available |
+| Ad hoc gas/food purchase diary under the main blocks | Retained through the normalized Transactions sheet rather than copied into the budget totals twice |
+| Custom spreadsheet formulas and manual annotations | Not imported; totals remain app-calculated snapshot values and notes remain opt-in |
+
+The CY overview uses these mappings: Income → Payroll, Additional income → Extra,
+Home/Rent → Home, Food/Grocery → Grocery, Insurance → Insurance, Credit Card →
+Credit Card, and Misc. → Misc. The remaining app categories, including Going-out,
+are included. The savings inflow line is labeled **Savings withdrawals**, while
+the savings outflow line represents deposits set aside. The reference's carryover
+line is not treated as a deposit, withdrawal, or all-time savings balance.
+
+On CY sheets, **Total Due** is the negative sum of expenses and savings deposits.
+**Left Over** is income plus savings withdrawals plus that signed Total Due,
+which equals the app's remaining amount. This is a presentation change, not a
+change to saved financial records. Detailed sheets continue to show positive costs.
+Totals are calculated when exported; editing workbook inputs does not recalculate
+those snapshot totals or update the app. Conditional colors compare the values
+currently displayed, not whether a payment has cleared.
+
+The uploaded workbook is a private visual reference only. Its amounts, notes,
+comments, unrelated sheets, and embedded relationships are not bundled into the
+app, repository, or exported report. The export is generated from the selected
+app records, without requiring a template file on the phone. Exact font spacing
+can vary between Excel versions and spreadsheet viewers.
 
 Realistic expenses equal unlogged manual spending plus reported transactions,
 counted once. Other sheets are breakdowns of those totals, not additional spending.
@@ -125,6 +169,12 @@ Temporary synthetic workbooks are removed by the harness; no real data is requir
 Swift/iOS tooling is unavailable in this Linux workspace. The new app source and
 Swift-generated workbooks have **not been compiled or executed here**. Shell/Python
 syntax and repository checks do not replace the Mac harness or an Xcode build.
+The existing GitHub Mac workflow now runs these two verification scripts instead
+of `swift build`/`swift test`, which require a Swift package this repository does
+not contain. A workflow configuration is not proof that a run passed; check its
+result on GitHub. UIKit sharing and real Excel rendering still require device tests.
+The same Mac job also type-checks the three app Swift files against the iPhone
+simulator SDK; that check does not exercise storage, sharing, or rendered screens.
 
 Before using real records, exercise save/open in Excel, wrong codes and relaunch,
 note toggles, cancellation, backgrounding during generation and sharing, device

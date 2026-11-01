@@ -1,5 +1,5 @@
-# This workflow will build a Swift project
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-swift
+# Verify the actual Foundation models/exporter in this source-only iPhone package.
+# The repository has no Package.swift or Xcode project to build with swift build.
 
 name: Swift
 
@@ -13,10 +13,17 @@ jobs:
   build:
 
     runs-on: macos-latest
+    timeout-minutes: 10
 
     steps:
     - uses: actions/checkout@v4
-    - name: Build
-      run: swift build -v
-    - name: Run tests
-      run: swift test -v
+    - name: Verify budget models
+      run: sh Verification/check-chart.sh
+    - name: Verify Excel workbooks
+      run: sh Verification/check-excel-export.sh
+    - name: Type-check iPhone source
+      run: |
+        xcrun --sdk iphonesimulator swiftc -typecheck \
+          -sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" \
+          -target arm64-apple-ios16.0-simulator -swift-version 5 \
+          ContentView.swift ExcelExport.swift ExcelExportUI.swift
