@@ -12,3 +12,20 @@ node_modules/
 settings.plist
 passcode.json
 *.recovery.*
+
+# Voluntary financial exports and local export audit data must remain private.
+budget-export-*.json
+budget-export-*.csv
+budget-export-*.txt
+budget-export-*.xlsx
+export-history.json
+PrivateExports/
+ExcelExports/
+
+# Local credentials and signing secrets must never enter the source package.
+.env
+.env.*
+!.env.example
+*.p12
+*.p8
+*.mobileprovision

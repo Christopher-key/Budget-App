@@ -19,7 +19,9 @@ are included.
   points for expense budget met/exceeded, in Trends → History & Trends alongside
   read-only monthly history (including the current month in progress).
 - Optional four-digit local screen lock and confirmed destructive reset.
-- App-local, backup-excluded storage; no Keychain, server, analytics, or app network calls.
+- Local Excel `.xlsx` exports with selected months, optional notes, fresh passcode
+  verification, and metadata-only export history in Settings.
+- App-local, backup-excluded storage; no Keychain, server, analytics, or automatic uploads.
 
 ## Open in Xcode
 
@@ -29,14 +31,27 @@ Requires Xcode 15 or later and an **iOS App / SwiftUI** target with iOS 16 or la
    iOS → App, with SwiftUI and Swift selected.
 2. Replace the entire contents of its `ContentView.swift` with this repository's
    file. Keep the app's existing `@main` entry point that displays `ContentView()`.
+   Add `ExcelExport.swift` and `ExcelExportUI.swift` to the same iOS app target.
 3. Add `PrivacyInfo.xcprivacy` to the app target. Merge it with an existing manifest
    rather than creating conflicting duplicates.
 4. Choose an iPhone simulator or connected iPhone, then press Command-R.
-5. Keep `Verification/` out of the app target. Its Swift file is a command-line
-   test harness with top-level executable checks, not application source.
+5. Keep `Verification/` out of the app target. Its Swift files are command-line
+   test harnesses with top-level executable checks, not application source.
 
 Your local app icons, signing settings, bundle identifier, and Xcode project are
 not part of these source files. Configure those in Xcode.
+
+## Export to Excel
+
+Open **Settings → Export to Excel**, choose months, enter your app passcode, and
+save the workbook through iOS. Use **On My iPhone** in Files to keep the saved copy
+local. Notes are excluded by default. **Settings → Export history** records attempts
+and iOS handoffs without storing a second financial payload.
+
+See [Excel export instructions](EXCEL-EXPORT.md) for workbook sheets, security,
+verification, and limits. No ChatGPT/API connection, hosting, or Microsoft sign-in
+is needed. A destination you select may upload its copy; exports are not encrypted
+with your app passcode, and reset cannot delete copies outside the app.
 
 ## Pay dates and budget sections
 
@@ -86,6 +101,8 @@ file protection. Existing app-owned defaults are migrated after a successful wri
 The passcode is a screen lock, not separate database encryption. Reset requires
 an explicit destructive confirmation. The app cannot delete existing external
 backups or control Apple's system diagnostics and device services.
+Export history and temporary workbooks also use protected, backup-excluded local
+storage. A saved or shared workbook is a separate copy under its destination's control.
 
 See `APP-STORE-PRIVACY.md` for the submission checklist and
 `PRIVACY-POLICY-DRAFT.md` for policy text to complete before publishing.
@@ -101,12 +118,15 @@ On a Mac with Swift command-line tools, run:
 
 ```sh
 sh Verification/check-chart.sh
+sh Verification/check-excel-export.sh
 ```
 
 The script tests the actual Foundation-only models for budget arithmetic,
 calendar-year comparisons, section boundaries, schedule changes, and old-data
 migration. UI rendering, device storage, app locking, and network activity require
 separate iPhone/Xcode checks.
+The Excel harness also requires Python 3 to independently inspect synthetic `.xlsx`
+packages. The app and Swift-generated workbooks have not been run in this workspace.
 
 ## Performance review
 

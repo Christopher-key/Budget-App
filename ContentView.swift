@@ -198,7 +198,7 @@ let expenseCategories = [
     "Car", "Insurance", "Phone", "Going-out", "Grocery"
 ]
 
-struct ExpenseEntry: Identifiable, Codable {
+struct ExpenseEntry: Identifiable, Codable, Sendable {
     var id = UUID()
     let name: String
     var amount = ""
@@ -228,7 +228,7 @@ enum BudgetDates {
     }
 }
 
-enum PayFrequency: String, Codable, CaseIterable, Identifiable {
+enum PayFrequency: String, Codable, CaseIterable, Identifiable, Sendable {
     case monthly, biWeekly, weekly
     var id: String { rawValue }
 
@@ -249,7 +249,7 @@ enum PayFrequency: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-struct BudgetWindow: Identifiable {
+struct BudgetWindow: Identifiable, Sendable {
     let index: Int
     let startDay: Int
     let endDay: Int
@@ -259,7 +259,7 @@ struct BudgetWindow: Identifiable {
     func contains(day: Int) -> Bool { (startDay...endDay).contains(day) }
 }
 
-struct PaySchedule: Codable, Equatable {
+struct PaySchedule: Codable, Equatable, Sendable {
     var frequency: PayFrequency = .biWeekly
     var days: [Int] = []
 
@@ -291,7 +291,7 @@ struct PaySchedule: Codable, Equatable {
     }
 }
 
-struct BudgetPlan: Codable {
+struct BudgetPlan: Codable, Sendable {
     var payroll = ""
     var extra = ""
     var savings = ""
@@ -360,7 +360,7 @@ struct BudgetPlan: Codable {
     }
 }
 
-struct MonthlyBudget: Identifiable, Codable {
+struct MonthlyBudget: Identifiable, Codable, Sendable {
     let id: String
     let date: Date
     var periods = [PeriodBudget(), PeriodBudget()]
@@ -465,12 +465,12 @@ struct MonthlyBudget: Identifiable, Codable {
     }
 }
 
-struct PeriodBudget: Codable {
+struct PeriodBudget: Codable, Sendable {
     var realistic = BudgetPlan()
     var budgeted = BudgetPlan()
 }
 
-struct ReportedExpense: Identifiable, Codable {
+struct ReportedExpense: Identifiable, Codable, Sendable {
     var id = UUID()
     var date = Date() {
         didSet { dayOfMonth = BudgetDates.day(of: date) }
@@ -947,6 +947,15 @@ final class AppLockStore: ObservableObject {
         storageMessage = nil
     }
 
+    // Reauthentication grants one export operation, never a persistent unlock.
+    func authorizeExport(code: String) throws {
+        guard isEnabled else { throw ExcelSharingError.passcodeRequired }
+        guard isUnlocked else { throw ExcelSharingError.inactiveSession }
+        guard defaults.errorMessage == nil else { throw ExcelSharingError.historyUnavailable }
+        try verify(code)
+        guard defaults.errorMessage == nil else { throw ExcelSharingError.historyUnavailable }
+    }
+
     func enable(code: String) throws {
         guard !isEnabled else { throw AppLockError.secureStorage }
         let record = try PasscodeRecord.create(code: code)
@@ -1004,9 +1013,11 @@ final class AppLockStore: ObservableObject {
 
 // MARK: - App entry and privacy gate
 
+@MainActor
 struct ContentView: View {
     @StateObject private var store = BudgetStore()
     @StateObject private var appLock = AppLockStore()
+    @StateObject private var exports = ExcelExportCoordinator()
     @State private var sessionID = UUID()
     @State private var showResetFailure = false
     @State private var resetFailureMessage = ""
@@ -1017,8 +1028,8 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            // With locking enabled, remove the entire tab presentation and its
-            // sheets while inactive, rather than placing a cover beneath them.
+            // With locking enabled, discard tabs and edit forms while inactive.
+            // An already authorized root-owned export handoff can finish safely.
             if let message = localPreferences.errorMessage {
                 LocalStorageProblemView(message: message, onReset: eraseAndReset)
             } else if appLock.isEnabled && scenePhase != .active {
@@ -1030,12 +1041,23 @@ struct ContentView: View {
             } else if appLock.isEnabled && !appLock.isUnlocked {
                 PasscodeLockView(appLock: appLock, onReset: eraseAndReset)
             } else {
-                BudgetTabs(store: store, appLock: appLock, onReset: eraseAndReset)
+                BudgetTabs(store: store, appLock: appLock, exports: exports, onReset: eraseAndReset)
                     .id(sessionID)
             }
 
         }
+        .background(ExportPrivacyCurtain().allowsHitTesting(false))
+        .sheet(item: $exports.activeShare) { file in
+            ExcelShareSheet(file: file,
+                onPresented: { exports.markSharePresented(id: file.id) },
+                onComplete: { completed, failed in
+                    exports.finishShare(id: file.id, completed: completed, failed: failed)
+                })
+                .interactiveDismissDisabled()
+        }
+        .onAppear { exports.sceneDidChange(isActive: scenePhase == .active) }
         .onChange(of: scenePhase) { phase in
+            exports.sceneDidChange(isActive: phase == .active)
             if phase == .active {
                 store.prepareCurrentMonth()
             } else {
@@ -1046,6 +1068,13 @@ struct ContentView: View {
             }
         }
         .onReceive(monthCheck) { _ in store.prepareCurrentMonth() }
+        .alert("Excel export", isPresented: Binding(
+            get: { exports.message != nil },
+            set: { if !$0 { exports.message = nil } })) {
+            Button("OK", role: .cancel) { exports.message = nil }
+        } message: {
+            Text(exports.message ?? "")
+        }
         .alert("Reset incomplete", isPresented: $showResetFailure) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -1055,6 +1084,7 @@ struct ContentView: View {
 
     private func eraseAndReset() {
         do {
+            try exports.prepareForReset()
             // Erase financial data BEFORE removing its lock. A failed data write
             // must never leave old budgets accessible without their passcode.
             try store.eraseAllData()
@@ -1062,6 +1092,7 @@ struct ContentView: View {
             guard localPreferences.errorMessage == nil else {
                 throw LocalFileError.invalidSettings
             }
+            exports.resetDidFinish()
             try appLock.erasePasscode()
         } catch {
             resetFailureMessage = error.localizedDescription
@@ -1070,9 +1101,11 @@ struct ContentView: View {
     }
 }
 
+@MainActor
 struct BudgetTabs: View {
     @ObservedObject var store: BudgetStore
     @ObservedObject var appLock: AppLockStore
+    @ObservedObject var exports: ExcelExportCoordinator
     let onReset: () -> Void
 
     var body: some View {
@@ -1102,7 +1135,7 @@ struct BudgetTabs: View {
             .tabItem { Label("Trends", systemImage: "chart.xyaxis.line") }
 
             NavigationStack {
-                SettingsView(store: store, appLock: appLock, onReset: onReset)
+                SettingsView(store: store, appLock: appLock, exports: exports, onReset: onReset)
             }
             .tabItem { Label("Settings", systemImage: "gearshape.fill") }
         }
@@ -1648,9 +1681,11 @@ enum PasscodeAction: String, Identifiable {
     }
 }
 
+@MainActor
 struct SettingsView: View {
     @ObservedObject var store: BudgetStore
     @ObservedObject var appLock: AppLockStore
+    @ObservedObject var exports: ExcelExportCoordinator
     let onReset: () -> Void
     @State private var passcodeAction: PasscodeAction?
     @State private var showEraseConfirmation = false
@@ -1697,6 +1732,19 @@ struct SettingsView: View {
                 Text("App lock")
             } footer: {
                 Text("When enabled, your passcode is required when you reopen the app or return after leaving it.")
+            }
+
+            Section {
+                NavigationLink("Export to Excel") {
+                    ExcelExportView(store: store, appLock: appLock, exports: exports)
+                }
+                NavigationLink("Export history") {
+                    ExcelExportHistoryView(exports: exports)
+                }
+            } header: {
+                Text("Excel exports")
+            } footer: {
+                Text("Create a workbook on this device. Every export requires your app passcode. Choose where to save or share the copy.")
             }
 
             Section {
@@ -1825,16 +1873,20 @@ struct LocalPrivacyView: View {
                 Text("Income, pay schedules and dates, budgets, reported transactions, notes, savings, and monthly history are processed and stored locally by this app. No account or internet connection is required for budgeting.")
             }
             Section("No collection or tracking") {
-                Text("This app does not send your records to the developer or to an online service. It contains no analytics or advertising SDK, tracking, remote push service, or automatic sharing feature. It makes no app-initiated network requests.")
+                Text("This app does not automatically upload your records to the developer or an online service. It contains no analytics or advertising SDK, tracking, remote push service, or automatic sharing feature. Budgeting and Excel export generation make no app-initiated network requests.")
+            }
+            Section("Excel exports") {
+                Text("Settings → Export to Excel creates a workbook of selected months after fresh app-passcode verification. Transaction notes are excluded unless selected. Export history stores dates, scope, counts, format, and outcomes without financial amounts or note text.")
+                Text("You choose where to save or share the workbook. Choose On My iPhone in Files to keep a saved copy on this device. Cloud-backed folders and sharing apps may upload their copy under their own policies. The exported workbook is not encrypted with your app passcode. There is no ChatGPT or Microsoft API connection.")
             }
             Section("Passcode") {
                 Text("An optional four-digit passcode controls access to the screens. A salted passcode verifier is stored locally, without Keychain. This screen lock does not separately encrypt the budget database. App files use iOS file protection.")
             }
             Section("Storage and backups") {
-                Text("App-owned records, recovery copies, and lock metadata are marked to be excluded from device backups. There is no cloud sync or online recovery. The app cannot remove copies in backups that already existed. Losing the device or deleting the app can mean losing these records.")
+                Text("App-owned records, recovery copies, lock metadata, export history, and temporary workbooks are marked to be excluded from device backups. There is no cloud sync or online recovery. The app cannot remove copies in backups that already existed. Losing the device or deleting the app can mean losing these records.")
             }
             Section("Deleting your data") {
-                Text("Settings → Erase all app data and Forgot passcode both offer a reset after a destructive confirmation. Reset removes the app's local financial records, passcode verifier, and recovery copies. It cannot remove copies created outside the app or in existing backups.")
+                Text("Settings → Erase all app data and Forgot passcode both offer a reset after a destructive confirmation. Reset removes the app's local financial records, passcode verifier, recovery copies, export history, and temporary workbooks. It cannot remove workbooks saved/shared outside the app or copies in existing backups.")
             }
             Section("Apple and device services") {
                 Text("Apple manages App Store distribution, device backups, and system diagnostics under its own policies and your device settings. The app does not deliberately attach financial records to diagnostics. This policy describes the app's behavior, not every operating-system or user action.")
@@ -2029,7 +2081,7 @@ struct EraseDataConfirmation: ViewModifier {
                 Button("Erase all data and reset", role: .destructive, action: onReset)
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This permanently erases all budgets, transactions, savings records, monthly history, recovery copies, and the passcode stored by this app on this device. You will start again with an empty budget. This cannot be undone within the app.")
+                Text("This permanently erases all budgets, transactions, savings records, monthly history, recovery copies, export history, temporary workbooks, and the passcode stored by this app on this device. It cannot erase copies saved or shared outside the app. You will start again with an empty budget. This cannot be undone within the app.")
             }
     }
 }

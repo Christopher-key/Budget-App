@@ -2,7 +2,15 @@
 
 ## Prepared artifacts
 
-- `ContentView.swift`: current complete app source. Financial records, recovery
+- `ExcelExport.swift` creates local `.xlsx` reports without a server, network
+  client, or third-party package. `ExcelExportUI.swift` provides fresh passcode
+  authorization, protected staging, metadata-only history, and user-selected iOS
+  sharing. Add both files to the app target alongside `ContentView.swift`.
+- Excel export is voluntary. Cloud-backed destinations may transmit their copy;
+  exports are not passcode-encrypted, and reset cannot remove external copies.
+  Review App Store privacy answers against the final shipping sharing behavior
+  and current Apple definitions rather than treating the existing manifest as certification.
+- `ContentView.swift`: budget screens, models, and local storage. Financial records, recovery
   copies, passcode verifier, and lock retry metadata use Application Support/MyBudget.
   Parent backup exclusion is set and verified before writing. Files use iOS
   complete file protection and atomic writes. Redundant individual file backup
@@ -39,6 +47,7 @@
 ## Add to Xcode
 
 1. Replace the existing ContentView.swift contents with this version.
+   Add ExcelExport.swift and ExcelExportUI.swift to the same iOS target.
 2. Add PrivacyInfo.xcprivacy to the app target. If a manifest already exists,
    merge these entries instead of adding a conflicting duplicate. Check target
    membership and that the manifest is included in the built app.
@@ -52,6 +61,15 @@
 ## Verify on your Mac and iPhone
 
 This cloud workspace cannot compile the iOS app or verify device behavior.
+
+Run `sh Verification/check-excel-export.sh` on a Mac with Swift and Python 3.
+It generates only temporary synthetic workbooks and independently checks ZIP/XML
+structure, financial arithmetic, scope, note handling, and invalid-record rejection.
+It does not test UIKit sharing, real Excel compatibility, storage, or authorization.
+Before release, open a sample workbook in Excel and exercise passcode failure,
+cooldown/relaunch, cancellation, generation while backgrounding, sharing while
+locked, app-switcher concealment, history, and reset. Confirm stale callbacks cannot
+release files or restore history after reset. Keep Verification out of the app target.
 
 Optional chart accounting checks can be run on your Mac from this folder with
 `sh Verification/check-chart.sh`. The script extracts the actual app models and
@@ -96,8 +114,8 @@ Review the latest App Store Connect questions during submission.
 
 ## Limits of the claim
 
-Use: **“The app does not transmit your budget data and requires no account or
-internet connection for its budgeting features.”**
+Use: **“Budgeting and Excel export generation work locally without an account or
+internet connection. Data is shared only through a destination you choose.”**
 
 Avoid an absolute promise that no information can ever leave a phone. The app
 does not control Apple system diagnostics, existing backups, screenshots, user

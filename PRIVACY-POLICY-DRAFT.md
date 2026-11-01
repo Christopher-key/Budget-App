@@ -9,8 +9,25 @@ the supplied offline app code; verify it against the app you actually submit.
 
 Income, pay schedules and dates, budgets, spending categories, reported transactions, notes, savings,
 and monthly history are processed and stored locally by the app. The app does
-not send these records to the developer, a server, an analytics service, or an
-advertising service. No account or internet connection is required for budgeting.
+not automatically send these records to the developer, a server, an analytics
+service, or an advertising service. No account or internet connection is required
+for budgeting or creating a local Excel workbook.
+
+## Voluntary Excel exports
+
+You can export selected months to an Excel workbook from Settings. Every export
+requires fresh entry of an enabled app passcode. Notes are excluded unless you
+choose to include them. Passcodes and credentials are never included.
+
+The workbook is created locally and offered through the iOS share/save interface.
+Choosing a cloud-backed folder or another sharing service may upload that copy
+under the destination's privacy and retention policies. Choose On My iPhone in
+Files to keep a saved copy on the device. Exported workbooks are not encrypted
+with the app passcode. There is no automatic ChatGPT, Microsoft, or other API connection.
+
+Local export history records timestamps, selected months, counts, format, note
+inclusion, and outcomes, without recording financial amounts or note text.
+An iOS-reported handoff does not confirm that a recipient opened or retained a file.
 
 ## Passcode
 
@@ -21,7 +38,7 @@ passcode is a screen lock; it does not separately encrypt the budget database.
 ## Storage and backups
 
 App-owned financial records, passcode information, recovery copies, and lock
-metadata are stored in an app-private folder that the app marks as excluded from
+metadata, export history, and temporary workbooks are stored in an app-private folder that the app marks as excluded from
 device backups. iOS file protection is applied to those files. There is no app
 cloud-sync or online-recovery service. If the app is deleted or the device is lost,
 the app has no service that can restore these records.
@@ -35,15 +52,16 @@ not an absolute guarantee about every device, operating-system, or user action.
 
 The supplied app has no analytics or advertising SDK, tracking, remote push
 service, or automatic data-sharing feature. It makes no app-initiated network
-requests. Apple may provide App Store or system-level reports under its policies;
+requests for budgeting or export generation. User-selected sharing destinations
+may use the network. Apple may provide App Store or system-level reports under its policies;
 the app does not deliberately attach budget or transaction records to those reports.
 
 ## Deleting information
 
 You can delete local app records using Settings → Erase all app data. The
 Forgot passcode flow also offers a reset. Both require a destructive confirmation.
-This removes the app's local financial records, passcode verifier, and recovery
-copies. It cannot remove copies in preexisting backups or copies created outside
+This removes the app's local financial records, passcode verifier, recovery
+copies, export history, and temporary workbooks. It cannot remove copies in preexisting backups or copies saved/shared outside
 the app.
 
 ## Contact
