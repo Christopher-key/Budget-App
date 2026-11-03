@@ -11,7 +11,8 @@ website alone does not create its API or database.
 2. In your Azure subscription, choose an existing resource group and a region for
    the backend. Your Azure account is for managing hosting, not for app users.
 3. Follow [the backend deployment steps](infra/README.md) to provision the Functions
-   API, private runtime/package storage, and Cosmos database; publish the API ZIP.
+   API, private runtime/package storage, and Cosmos database; publish the API ZIP
+   built by GitHub using `infra/publish-github-build.sh`.
    These resources may incur charges. Nothing creates them automatically on push.
 4. Deploy the website with its public API address as described below.
 5. Test account creation, a second browser, and deletion with invented records.
@@ -47,7 +48,8 @@ Overview → URL**, or the workflow's **Website address** summary.
 
 The workflow preserves your existing resource-specific deployment-token secret
 and deploys only `web/dist`. The separate **Cloud application checks** workflow
-tests the backend and produces a `budget-api-package` artifact; it does not deploy
+tests the backend and publishes a code-only API build and checksum for Cloud Shell
+to download directly. It also keeps a `budget-api-package` artifact; it does not deploy
 paid resources or grant GitHub access to your database. Without an API address,
 the website explains that the owner needs to finish setup; it does not send users
 to Microsoft documentation or provide a fake account.

@@ -20,13 +20,25 @@ python3 - "$stage" "$output" <<'PY'
 import os, pathlib, sys, zipfile
 stage = pathlib.Path(sys.argv[1])
 output = pathlib.Path(sys.argv[2])
-with zipfile.ZipFile(output, 'x', compression=zipfile.ZIP_DEFLATED) as archive:
+with zipfile.ZipFile(output, 'x', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
     for directory, directories, names in os.walk(stage):
-        directories[:] = [name for name in directories if name != '.bin']
-        for name in names:
+        directories[:] = sorted(name for name in directories if name != '.bin')
+        for name in sorted(names):
             path = pathlib.Path(directory) / name
             if path.is_symlink():
                 raise SystemExit('Unexpected symbolic link in staged package.')
-            archive.write(path, path.relative_to(stage).as_posix())
+            relative = path.relative_to(stage).as_posix()
+            # npm's internal install bookkeeping is not needed at runtime and
+            # can differ between npm versions even with the same lockfile.
+            if relative == 'node_modules/.package-lock.json':
+                continue
+            # Stable metadata makes retries safe after an ephemeral Cloud Shell
+            # session: the same source/dependencies reproduce the same ZIP.
+            entry = zipfile.ZipInfo(relative, date_time=(2020, 1, 1, 0, 0, 0))
+            entry.create_system = 3
+            mode = 0o100755 if path.stat().st_mode & 0o111 else 0o100644
+            entry.external_attr = mode << 16
+            archive.writestr(entry, path.read_bytes(), compress_type=zipfile.ZIP_DEFLATED,
+                             compresslevel=9)
 print('API ZIP created with host.json at its root. It contains code and runtime dependencies only.')
 PY

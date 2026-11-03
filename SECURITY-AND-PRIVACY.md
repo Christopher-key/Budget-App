@@ -89,6 +89,20 @@ it does not eliminate the need to trust the software delivered to devices.
 Only the app owner should hold production Azure/GitHub administration rights;
 use scoped roles, protected deployments, and reviewed changes.
 
+The API build runs in GitHub with read-only repository access and no Azure
+credentials. A separate job receives repository-content write permission only
+to publish the tested, code-only package and its checksum. The package contains
+no production account records, server settings, or budget keys. Cloud Shell
+downloads that package and uses the owner's Azure identity to publish it; no
+Node build or manual ZIP upload is required there. The checksum detects a changed
+or damaged download; it cannot establish that a compromised builder produced
+safe code.
+
+The existing website workflow separately uses its resource-specific Static Web
+Apps deployment token from GitHub Secrets. That token can update the website,
+which is why repository/workflow administration remains part of the software
+trust boundary. It is not a budget-app user password or database credential.
+
 The Azure explicit-deny policies and live role audit are deferred to the owner's
 hosting setup session. The infrastructure template's scoped grants do not imply
 that those additional policies already exist in the subscription.

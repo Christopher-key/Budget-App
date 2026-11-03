@@ -36,8 +36,9 @@ configured. Azure still handles operational/network metadata.
 
 ## 1. One-time owner prerequisites
 
-Use your own machine with Azure CLI, its Bicep component, Python 3, Node.js 22,
-and an **existing** subscription/resource group. Choose a region supporting
+Use Azure Cloud Shell Bash, or your own machine with Azure CLI, its Bicep
+component, Python 3, curl, Git, and an **existing** subscription/resource group.
+Node.js 22 or 24 is needed only if you choose to build locally. Choose a region supporting
 Linux Consumption Functions and serverless Cosmos. Verify quota and provider
 registration for Microsoft.Web, Microsoft.Storage, and Microsoft.DocumentDB.
 Sign into Azure as the owner using `az login`; this manages infrastructure and is
@@ -120,10 +121,39 @@ including account records and encrypted budgets, do not expire automatically.
 
 Provisioning creates infrastructure; it does not install the API package. A new
 Function App may fail startup until its private package and roles are available.
-The Cloud application checks GitHub workflow produces a downloadable
-`budget-api-package` artifact (three-day retention). It contains code and locked
-runtime dependencies, no private parameters or user records. Unzip the artifact
-to obtain `budget-api.zip`, or build locally on Node.js 22:
+The **Cloud application checks** GitHub workflow builds and tests the API. After
+all checks pass on `main`, it publishes `budget-api.zip` and its SHA-256 checksum
+as a code-only prerelease tagged `api-build-FULL_COMMIT_SHA`. Only the release
+job has repository-content write permission. GitHub receives no Azure credentials,
+server settings, database access, or financial records. You can also start the
+workflow manually from GitHub Actions on `main`.
+
+In Cloud Shell, clone this repository or update your existing checkout, then run:
+
+```sh
+bash infra/publish-github-build.sh \
+  --subscription '<SUBSCRIPTION_ID>' \
+  --resource-group '<EXISTING_RESOURCE_GROUP>'
+```
+
+This helper reads only public names from the existing `budget-backend` deployment,
+downloads the tested build for its source checkout, verifies its checksum and ZIP
+layout, then publishes it to the existing private package container. No browser
+ZIP transfer, local Node installation, private parameter file, new server key, or
+new Azure resource is required. `--release api-build-FULL_COMMIT_SHA` selects an
+earlier verified build deliberately. Wait for the workflow's publish job to finish
+before running the helper. If a source commit did not trigger a build, run the
+workflow manually on that commit's branch or select an existing build tag.
+
+The publishing account still needs the scoped permissions in step 1. The helper
+uses Azure CLI authentication, with shared keys, SAS tokens, and SCM password
+publishing disabled. Keep the saved server settings from infrastructure setup;
+code publication does not replace them.
+
+The workflow also keeps a `budget-api-package` artifact for three days. That
+download is an outer ZIP containing the inner `budget-api.zip`; the automated
+helper downloads the inner ZIP directly from the code release. For a local build
+on Node.js 22 or 24:
 
 ```sh
 npm ci --prefix api
@@ -146,12 +176,15 @@ Use the non-secret deployment outputs to publish to those existing resources:
   --package /tmp/budget-api-release-001.zip
 ```
 
-The script uploads with your Azure CLI identity, refuses to overwrite the release
-blob, points the app at its private package URL, restarts, and syncs triggers. It
+The script uploads with your Azure CLI identity, refuses to overwrite different
+release bytes, points the app at its private package URL, restarts, and syncs triggers. It
 never enables storage keys, generates SAS URLs, retrieves user data, or prints app
 settings. The Function uses its managed identity to read the private ZIP. Initial
 role propagation can take several minutes; retry startup after permissions settle.
 Your owner account must have the scoped publishing permissions noted above.
+If a previous attempt uploaded the identical package but failed during startup,
+the script verifies the existing blob's SHA-256 and safely resumes. A different
+package under the same immutable release filename is rejected.
 
 For later releases, change only `deploymentPackageBlobName` in your existing
 private parameter file to a new immutable ZIP name. Build/publish that release,

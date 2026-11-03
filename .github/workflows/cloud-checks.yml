@@ -1,11 +1,12 @@
 name: Cloud application checks
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
-    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', 'Verification/check-cloud-template.py', '.github/workflows/cloud-checks.yml']
+    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', 'Verification/check-cloud-template.py', 'Verification/test-api-publisher.py', '.github/workflows/cloud-checks.yml']
   pull_request:
-    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', 'Verification/check-cloud-template.py', '.github/workflows/cloud-checks.yml']
+    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', 'Verification/check-cloud-template.py', 'Verification/test-api-publisher.py', '.github/workflows/cloud-checks.yml']
 
 permissions:
   contents: read
@@ -28,6 +29,8 @@ jobs:
           python3 Verification/check-cloud-template.py "$RUNNER_TEMP/budget-template.json"
       - name: Financial models and Excel
         run: npm ci --prefix shared && npm run build --prefix shared && npm test --prefix shared
+      - name: Verify safe API publication and retries
+        run: python3 Verification/test-api-publisher.py
       - name: App accounts, encrypted sync, and passcode policy
         run: npm ci --prefix api && npm test --prefix api
       - name: Package deployable API
@@ -43,3 +46,35 @@ jobs:
         run: npm ci --prefix web && npm test --prefix web && npm run build --prefix web
       - name: Verify encrypted sync between browser and API
         run: ./web/node_modules/.bin/tsx --test Verification/cloud-integration.ts
+
+  publish_api_build:
+    name: Publish downloadable API build
+    needs: verify
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: budget-api-package
+          path: api-release
+      - name: Publish the tested code package and checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          cd api-release
+          sha256sum budget-api.zip > budget-api.zip.sha256
+          build_tag="api-build-$SOURCE_SHA"
+          if gh release view "$build_tag" >/dev/null 2>&1; then
+            mkdir existing
+            gh release download "$build_tag" --pattern budget-api.zip --dir existing
+            cmp budget-api.zip existing/budget-api.zip
+          else
+            gh release create "$build_tag" budget-api.zip budget-api.zip.sha256 \
+              --target "$SOURCE_SHA" --prerelease --latest=false \
+              --title "API build ${SOURCE_SHA:0:12}" \
+              --notes 'Verified application code and production dependencies only. No user records, passwords, server settings, or Azure credentials are included.'
+          fi

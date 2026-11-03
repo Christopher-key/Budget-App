@@ -14,6 +14,10 @@ hosting alone does not deploy the API/database. [Security and privacy
 boundaries](SECURITY-AND-PRIVACY.md) describe encryption, access controls, retained
 metadata, and the limits of excluding AI from externally administered systems.
 
+GitHub Actions builds the API and publishes a code-only package with its checksum.
+The [Cloud Shell publishing helper](infra/README.md#4-build-and-publish-api-code)
+downloads and deploys that package without browser ZIP transfers or local builds.
+
 The web account's third consecutive wrong app passcode erases its active encrypted
 budget, login credentials, wrapped encryption key, and grants. Account-password
 failures are throttled rather than triggering deletion. The native app remains
