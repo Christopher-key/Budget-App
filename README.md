@@ -8,7 +8,8 @@ slow-hashed login verifiers rather than passwords.
 
 The existing Azure Static Web Apps workflow builds and deploys `web/dist`.
 [Deployment instructions](AZURE-DEPLOYMENT.md) explain the separate backend and
-one public API-address setting needed for working accounts and sync. Website
+public API address used for accounts and sync. The existing website workflow
+defaults to SimpleBudget's deployed API; a repository variable can override it. Website
 hosting alone does not deploy the API/database. [Security and privacy
 boundaries](SECURITY-AND-PRIVACY.md) describe encryption, access controls, retained
 metadata, and the limits of excluding AI from externally administered systems.

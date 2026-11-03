@@ -162,10 +162,13 @@ migrate schemas. Securely delete unneeded old code packages when no longer usefu
 
 ## 5. Connect the existing website
 
-In GitHub repository **Settings → Secrets and variables → Actions → Variables**,
-set only `VITE_API_BASE_URL` to the `apiBaseUrl` output, without `/api` or a trailing
-slash. Then run **Azure Static Web Apps CI/CD** again. The existing SWA deployment
-secret is preserved. There are no frontend Azure client IDs, scopes, user tenant
+The existing SimpleBudget website workflow defaults to its deployed API origin,
+`https://simplebudget-q5q2a6ddopmq4.azurewebsites.net`. For a different backend,
+set `VITE_API_BASE_URL` in GitHub repository **Settings → Secrets and variables →
+Actions → Variables** to the public `apiBaseUrl` output, without `/api` or a
+trailing slash. That variable overrides the workflow default. Then run **Azure
+Static Web Apps CI/CD** again. The existing SWA deployment secret is preserved.
+There are no frontend Azure client IDs, scopes, user tenant
 registrations, client secrets, database keys, or password values to configure.
 A custom website domain requires the exact `frontendOrigin`/`APP_ORIGIN` to be
 updated deliberately; no wildcard is accepted.

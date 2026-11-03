@@ -13,7 +13,7 @@ website alone does not create its API or database.
 3. Follow [the backend deployment steps](infra/README.md) to provision the Functions
    API, private runtime/package storage, and Cosmos database; publish the API ZIP.
    These resources may incur charges. Nothing creates them automatically on push.
-4. Set the one public website variable below, then rerun the website workflow.
+4. Deploy the website with its public API address as described below.
 5. Test account creation, a second browser, and deletion with invented records.
 
 No Entra app registration, OAuth redirect URI, Microsoft sign-in setup, Graph
@@ -22,14 +22,21 @@ link was a developer setup placeholder, not a working account login.
 
 ## Connect the website to the API
 
-Open **GitHub → Christopher-key/Budget-App → Settings → Secrets and variables →
-Actions → Variables → New repository variable** and add:
+The existing SimpleBudget website workflow now defaults to the public API origin
+`https://simplebudget-q5q2a6ddopmq4.azurewebsites.net`. Pushing that workflow change
+rebuilds and deploys the connected website automatically. The API package must
+also be published before accounts and sync can work.
+
+To point a later deployment at another backend, open **GitHub →
+Christopher-key/Budget-App → Settings → Secrets and variables → Actions →
+Variables → New repository variable** and add this override:
 
 | Variable | Value |
 | --- | --- |
 | `VITE_API_BASE_URL` | Your deployed API origin, for example `https://YOUR-API.azurewebsites.net`, without `/api` or a trailing slash |
 
-This address is public configuration, not a credential. Never put server keys,
+The variable takes precedence over the workflow default. This address is public
+configuration, not a credential. Never put server keys,
 passwords, account proofs, financial records, or deployment tokens in a `VITE_`
 variable. The old `VITE_AZURE_CLIENT_ID`, `VITE_AZURE_AUTHORITY`, and
 `VITE_AZURE_SCOPE` variables are no longer used and can be removed.

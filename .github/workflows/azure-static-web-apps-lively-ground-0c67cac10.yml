@@ -30,7 +30,7 @@ jobs:
       - name: Build website
         run: npm run build --prefix web
         env:
-          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL || 'https://simplebudget-q5q2a6ddopmq4.azurewebsites.net' }}
       - name: Deploy prebuilt website
         id: deployment
         uses: Azure/static-web-apps-deploy@v1
