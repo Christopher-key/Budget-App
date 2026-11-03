@@ -3,6 +3,7 @@ import type { EncryptedBudgetEnvelope } from '../../shared/cloud.js';
 import { UNLOCK_HEADER } from '../../shared/contracts.js';
 import { emptyLedger, validateLedger, monthId, newMonth } from '../../shared/model.js';
 import type { AuthSession, PublicConfig } from './auth.js';
+import { isServiceFailure, SecurityMonitor, ServiceSecurityError } from './security.js';
 import { decryptLedger, encryptLedger } from './crypto.js';
 
 export class ApiError extends Error {
@@ -19,9 +20,11 @@ function validateGrant(value: UnlockResponse): UnlockResponse {
 export class BudgetApi {
   private grant = '';
   private generation = 0;
+  private emergencyGeneration = 0;
   private pending = new Map<AbortController, { write: boolean; retained: boolean }>();
   private auth: AuthSession | undefined;
-  constructor(private config: PublicConfig, auth: AuthSession, private fetcher: typeof fetch = fetch.bind(globalThis)) { this.auth = auth; }
+  constructor(private config: PublicConfig, auth: AuthSession, private fetcher: typeof fetch = fetch.bind(globalThis), public readonly security?: SecurityMonitor) { this.auth = auth; }
+  emergencyDiscard() { this.emergencyGeneration++; this.forgetAuthentication(); }
   setGrant(value: string) { this.grant = value; }
   isAuthenticated() { return !!this.auth?.accessToken && Date.now() < this.auth.expiresAt; }
   clear(preserveWrites = false) {
@@ -39,6 +42,7 @@ export class BudgetApi {
   async request<T>(path: string, method = 'GET', body?: unknown, unlocked = false): Promise<T> {
     const accessToken = this.authenticated().accessToken;
     if (unlocked && !this.grant) throw new ApiError('LOCKED', 423);
+    const operation = this.security?.operation(true);
     // Capture the lease while it is active. An encrypted write already being
     // prepared may finish after locking; later requests cannot reuse this lease.
     const grant = this.grant;
@@ -46,8 +50,12 @@ export class BudgetApi {
     const controller = new AbortController();
     const request = { write: path === 'budget' && method === 'PUT', retained: false };
     this.pending.set(controller, request);
+    const abort = () => controller.abort();
+    operation?.signal.addEventListener('abort', abort, { once: true });
     try {
+      operation?.assertOpen();
       const preparedBody = await body;
+      operation?.assertOpen();
       if (generation !== this.generation && !request.retained) throw new ApiError('LOCKED', 423);
       if (controller.signal.aborted) throw new ApiError('UNAVAILABLE', 503);
       const headers: Record<string, string> = { Authorization: `Bearer ${accessToken}` };
@@ -58,17 +66,22 @@ export class BudgetApi {
         credentials: 'omit', cache: 'no-store', redirect: 'error', signal: controller.signal,
       });
       if (generation !== this.generation && !request.retained) throw new ApiError('LOCKED', 423);
+      operation?.assertOpen();
       if (response.status === 204 && response.ok) return undefined as T;
       let value: any;
       try { value = await response.json(); } catch { throw new ApiError('UNAVAILABLE', response.status); }
       if (generation !== this.generation && !request.retained) throw new ApiError('LOCKED', 423);
-      if (!response.ok) throw new ApiError(typeof value?.code === 'string' ? value.code : 'UNAVAILABLE', response.status,
-        validCounter(value?.epoch) ? value.epoch : undefined);
+      if (!response.ok) {
+        this.security?.reportFailure(value?.code);
+        throw new ApiError(typeof value?.code === 'string' ? value.code : 'UNAVAILABLE', response.status, validCounter(value?.epoch) ? value.epoch : undefined);
+      }
+      operation?.assertOpen();
       return value as T;
     } catch (error) {
-      if (error instanceof ApiError) throw error;
+      if (error instanceof ServiceSecurityError || error instanceof ApiError) throw error;
+      operation?.assertOpen();
       throw new ApiError('UNAVAILABLE', 503);
-    } finally { this.pending.delete(controller); }
+    } finally { this.pending.delete(controller); operation?.signal.removeEventListener('abort', abort); operation?.release(); }
   }
   async status() {
     const accountId = this.authenticated().accountId;
@@ -105,6 +118,7 @@ export class BudgetApi {
   erase(epoch: number) { return this.request<{ epoch: number }>('account', 'DELETE', { epoch }, true); }
   async revoke() {
     if (!this.grant || !this.isAuthenticated() || !this.auth) return;
+    try { this.security?.assertOpen(undefined, true); } catch { return; }
     // Captured credentials belong to this lease only; completion cannot affect a later session.
     const headers = { Authorization: `Bearer ${this.auth.accessToken}`, [UNLOCK_HEADER]: this.grant, 'Content-Type': 'application/json' };
     try { await this.fetcher(this.config.apiBaseUrl + '/api/account/lock', { method: 'POST', headers, body: '{}', credentials: 'omit', cache: 'no-store', redirect: 'error', keepalive: true }); } catch { /* the server enforces lease expiry */ }
@@ -114,6 +128,12 @@ export class BudgetApi {
     active: Promise<{ epoch: number; revision: number }> | undefined): Promise<boolean> {
     if (!this.auth || !this.isAuthenticated() || !this.grant) return Promise.resolve(!queued && !active);
     const headers = { Authorization: `Bearer ${this.auth.accessToken}`, [UNLOCK_HEADER]: this.grant, 'Content-Type': 'application/json' };
+    const emergencyGeneration = this.emergencyGeneration;
+    const operation = this.security?.operation(true);
+    const ensureSafe = () => {
+      if (emergencyGeneration !== this.emergencyGeneration) throw new ApiError('SERVICE_LOCKED', 503);
+      operation?.assertOpen();
+    };
     const expectedRevision = revision + (active ? 1 : 0);
     const expectedEpoch = epoch;
     let encrypted: Promise<{ payload?: import('../../shared/cloud.js').CipherBlob; failed?: true }> | undefined;
@@ -122,6 +142,9 @@ export class BudgetApi {
     catch { return this.revoke().then(() => false); }
     const existingWrites = [...this.pending].filter(([, request]) => request.write).map(([controller]) => controller);
     const controller = new AbortController();
+    this.pending.set(controller, { write: true, retained: false });
+    const abort = () => controller.abort();
+    operation?.signal.addEventListener('abort', abort, { once: true });
     const timeout = setTimeout(() => { controller.abort(); for (const request of existingWrites) request.abort(); }, 8_000);
     // Promise.race is also necessary for adapters/browsers that do not honor abort.
     let expire!: () => void;
@@ -132,27 +155,33 @@ export class BudgetApi {
     return (async () => {
       let saved = true;
       try {
+        ensureSafe();
         if (active) {
           const acknowledged = await Promise.race([active, expired]);
+          ensureSafe();
           if (acknowledged.epoch !== expectedEpoch || acknowledged.revision !== expectedRevision) throw new ApiError('REVISION_CONFLICT', 409);
         }
         if (prepared) {
           const result = await Promise.race([prepared, expired]);
           if (result.failed || !result.payload) throw new ApiError('INVALID_ENCRYPTION', 503);
+          ensureSafe();
           const payload = result.payload;
           const response = await Promise.race([this.fetcher(this.config.apiBaseUrl + '/api/budget', {
             method: 'PUT', headers, body: JSON.stringify({ epoch: expectedEpoch, revision: expectedRevision, payload }),
             credentials: 'omit', cache: 'no-store', redirect: 'error', keepalive: true, signal: controller.signal,
           }), expired]);
+          ensureSafe();
           if (!response.ok) {
             let code = response.status === 401 ? 'AUTH_REQUIRED' : response.status === 410 ? 'ACCOUNT_ERASED' : 'UNAVAILABLE';
             try {
               const failure = await Promise.race([response.json(), expired]);
-              if (['AUTH_REQUIRED', 'ACCOUNT_ERASED', 'STALE_EPOCH', 'REVISION_CONFLICT'].includes(failure?.code)) code = failure.code;
+              if (isServiceFailure(failure?.code)) { this.security?.reportFailure(failure.code); code = failure.code; }
+              else if (['AUTH_REQUIRED', 'ACCOUNT_ERASED', 'STALE_EPOCH', 'REVISION_CONFLICT'].includes(failure?.code)) code = failure.code;
             } catch { /* HTTP authentication/deletion failures still clear account keys. */ }
             throw new ApiError(code, response.status);
           }
           const value = await Promise.race([response.json(), expired]);
+          ensureSafe();
           if (value?.epoch !== expectedEpoch || value?.revision !== expectedRevision + 1) throw new ApiError('UNAVAILABLE', 503);
         }
       } catch (error) {
@@ -161,9 +190,10 @@ export class BudgetApi {
       }
       finally {
         clearTimeout(timeout); controller.signal.removeEventListener('abort', expire);
+        this.pending.delete(controller); operation?.signal.removeEventListener('abort', abort); operation?.release();
         // Revoke only after the final save acknowledgement/failure. This captured
         // lease cannot revoke an unlock performed later on the same page.
-        try { await this.fetcher(this.config.apiBaseUrl + '/api/account/lock', { method: 'POST', headers, body: '{}', credentials: 'omit', cache: 'no-store', redirect: 'error', keepalive: true, signal: AbortSignal.timeout(3_000) }); } catch { /* server lease expiry remains authoritative */ }
+        try { ensureSafe(); await this.fetcher(this.config.apiBaseUrl + '/api/account/lock', { method: 'POST', headers, body: '{}', credentials: 'omit', cache: 'no-store', redirect: 'error', keepalive: true, signal: AbortSignal.timeout(3_000) }); } catch { /* server lease expiry remains authoritative */ }
       }
       return saved;
     })();
@@ -171,8 +201,11 @@ export class BudgetApi {
   async logout(after?: Promise<unknown>) {
     if (!this.auth || !this.isAuthenticated()) return;
     const headers = { Authorization: `Bearer ${this.auth.accessToken}`, 'Content-Type': 'application/json' };
+    const emergencyGeneration = this.emergencyGeneration;
     try {
       await after;
+      if (emergencyGeneration !== this.emergencyGeneration) return;
+      this.security?.assertOpen(undefined, true);
       await this.fetcher(this.config.apiBaseUrl + '/api/auth/logout', { method: 'POST', headers, body: '{}', credentials: 'omit', cache: 'no-store', redirect: 'error', keepalive: true, signal: AbortSignal.timeout(3_000) });
     } catch { /* the server enforces account-session expiry */ }
   }
@@ -192,7 +225,24 @@ export class BudgetSession {
   private activeSave?: Promise<{ epoch: number; revision: number }>;
   private locking?: Promise<boolean>;
   private version = 0;
-  constructor(public readonly api: BudgetApi) {}
+  private discarded = false;
+  private stopSecurity?: () => void;
+  constructor(public readonly api: BudgetApi) {
+    if (api.security) {
+      const version = api.security.snapshot().version;
+      this.stopSecurity = api.security.subscribe(() => {
+        if (api.security!.snapshot().version !== version) this.emergencyDiscard();
+      });
+    }
+  }
+  /** Incident path: discard immediately, with no save, logout, revoke or export. */
+  emergencyDiscard = () => {
+    if (this.discarded) return;
+    this.discarded = true; this.stopSecurity?.(); this.stopSecurity = undefined;
+    this.api.emergencyDiscard();
+    this.clear('signedOut', 'Service access is paused. Sign in again when it is restored.');
+    this.activeSave = undefined; this.inFlight = undefined; this.locking = undefined;
+  };
   snapshot = () => this.state;
   subscribe = (callback: () => void) => { this.listeners.add(callback); return () => { this.listeners.delete(callback); }; };
   private publish(patch: Partial<SessionState>) { this.state = { ...this.state, ...patch }; for (const listener of this.listeners) listener(); }
@@ -201,7 +251,8 @@ export class BudgetSession {
     this.api.clear(preserveWrites); this.publish({ phase, epoch, ledger: undefined, saving: false, message });
   }
   private failure(error: unknown) {
-    const code = error instanceof ApiError ? error.code : 'UNAVAILABLE';
+    const code = error instanceof ApiError || error instanceof ServiceSecurityError ? error.code : 'UNAVAILABLE';
+    if (isServiceFailure(code)) { this.api.security?.reportFailure(code); this.emergencyDiscard(); return; }
     if (code === 'ACCOUNT_ERASED' || code === 'STALE_EPOCH') {
       this.api.forgetAuthentication(); this.clear('erased', 'Your account and budget have been erased. Create an account to start again.', error instanceof ApiError ? error.epoch : undefined);
     } else if (code === 'AUTH_REQUIRED') {
@@ -319,6 +370,7 @@ export class BudgetSession {
     catch (error) { if (version === this.version) this.failure(error); }
   }
   lock = () => {
+    if (this.discarded) return Promise.resolve(false);
     if (this.locking && this.state.phase !== 'ready') return this.locking;
     const saving = this.api.finishBeforeLock(this.state.epoch, this.state.revision, this.queue, this.activeSave);
     this.clear('locked', '', this.state.epoch, true);
@@ -333,6 +385,8 @@ export class BudgetSession {
     return saving;
   };
   dispose() {
+    this.stopSecurity?.(); this.stopSecurity = undefined;
+    if (this.discarded) { this.listeners.clear(); return; }
     this.lock();
     const logout = this.api.logout(this.locking);
     this.clear('signedOut', '', this.state.epoch, true);

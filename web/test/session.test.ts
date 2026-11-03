@@ -4,6 +4,7 @@ import { emptyLedger } from '../../shared/model.js';
 import type { Ledger } from '../../shared/contracts.js';
 import { ApiError, BudgetApi, BudgetSession } from '../src/api.js';
 import type { PublicConfig } from '../src/auth.js';
+import { SecurityMonitor } from '../src/security.js';
 import { decryptLedger, encode, encryptLedger } from '../src/crypto.js';
 
 const config: PublicConfig = { configured: true, apiBaseUrl: 'https://budget-api.example.test' };
@@ -11,7 +12,7 @@ const accountId = encode(new Uint8Array(32).fill(7));
 const unlockToken = encode(new Uint8Array(32).fill(9));
 const accessToken = accountId + '.' + encode(new Uint8Array(32).fill(3));
 interface Call { path: string; method: string; body: any; headers: Headers; signal?: AbortSignal | null }
-async function fixture(override?: (call: Call) => Response | Promise<Response> | undefined) {
+async function fixture(override?: (call: Call) => Response | Promise<Response> | undefined, security?: SecurityMonitor) {
   const calls: Call[] = []; let epoch = 2, revision = 0;
   let ledger = emptyLedger();
   const dataKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
@@ -29,11 +30,11 @@ async function fixture(override?: (call: Call) => Response | Promise<Response> |
     if (call.path === 'account/lock' || call.path === 'auth/logout') return new Response(null, { status: 204 });
     throw new Error('Unexpected test request: ' + call.path);
   }) as typeof fetch;
-  const api = new BudgetApi(config, { accessToken, expiresAt: Date.now() + 1_800_000, accountId, dataKey }, fetcher);
+  const api = new BudgetApi(config, { accessToken, expiresAt: Date.now() + 1_800_000, accountId, dataKey }, fetcher, security);
   const session = new BudgetSession(api);
   return { api, session, calls, ledger, dataKey, setEpoch: (value: number) => { epoch = value; }, remoteSave: (value: Ledger) => { ledger = value; revision++; } };
 }
-async function opened(override?: Parameters<typeof fixture>[0]) { const f = await fixture(override); await f.session.checkStatus(); await f.session.open('1234'); assert.equal(f.session.snapshot().phase, 'ready'); return f; }
+async function opened(override?: Parameters<typeof fixture>[0], security?: SecurityMonitor) { const f = await fixture(override, security); await f.session.checkStatus(); await f.session.open('1234'); assert.equal(f.session.snapshot().phase, 'ready'); return f; }
 function changed(ledger: Ledger, payroll = '100.00') { const copy = structuredClone(ledger); copy.months[0].periods[0].realistic.payroll = payroll; return copy; }
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
 async function requestStarted(calls: Call[], method: string) { for (let i = 0; i < 100; i++) { const found = calls.find(c => c.method === method); if (found) return found; await new Promise(resolve => setTimeout(resolve, 1)); } throw new Error('Expected request did not start.'); }
@@ -194,4 +195,73 @@ test('explicit erasure requires the unlock grant, and disposal logs out and drop
   assert.equal(f.session.snapshot().phase, 'erased'); await assert.rejects(f.api.status(), (error: ApiError) => error.code === 'AUTH_REQUIRED'); f.session.dispose();
   const g = await opened(); g.session.dispose(); await new Promise(resolve => setTimeout(resolve, 0)); assert.equal(g.calls.filter(c => c.path === 'account/lock').length, 1); assert.equal(g.calls.filter(c => c.path === 'auth/logout').length, 1);
   assert.equal(g.session.snapshot().phase, 'signedOut'); assert.equal(g.session.snapshot().ledger, undefined); await assert.rejects(g.api.status(), (error: ApiError) => error.code === 'AUTH_REQUIRED');
+});
+
+
+test('incident discard drops queued edits, auth key and grant without save, logout, revoke or erase', async () => {
+  const monitor = new SecurityMonitor({});
+  const f = await opened(undefined, monitor);
+  f.session.edit(changed(f.session.snapshot().ledger!, '987.65'));
+  const before = f.calls.length;
+  monitor.reportFailure('SERVICE_LOCKED');
+  assert.equal(f.session.snapshot().ledger, undefined);
+  assert.equal(f.session.snapshot().phase, 'signedOut');
+  assert.equal(f.api.isAuthenticated(), false);
+  await f.session.flush(); await f.session.lock(); f.session.dispose();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(f.calls.length, before);
+});
+
+test('a lockdown cancels in-flight writes and ignores late acknowledgements and later queued edits', async () => {
+  const monitor = new SecurityMonitor({}), response = deferred<Response>();
+  const f = await opened(call => call.method === 'PUT' ? response.promise : undefined, monitor);
+  f.session.edit(changed(f.session.snapshot().ledger!, '100.00')); const saving = f.session.flush();
+  const put = await requestStarted(f.calls, 'PUT');
+  f.session.edit(changed(f.session.snapshot().ledger!, '200.00'));
+  monitor.reportFailure('SERVICE_LOCKED');
+  assert.equal(put.signal?.aborted, true);
+  response.resolve(Response.json({ epoch: 2, revision: 1 })); await saving;
+  f.session.dispose(); await f.session.flush();
+  assert.equal(f.session.snapshot().phase, 'signedOut'); assert.equal(f.session.snapshot().ledger, undefined);
+  assert.equal(f.calls.filter(call => call.method === 'PUT').length, 1);
+  assert.equal(f.calls.filter(call => ['account/lock', 'auth/logout', 'account'].includes(call.path)).length, 0);
+});
+
+test('a lockdown aborts an already-started normal lock flush and prevents its late revoke or logout', async () => {
+  const monitor = new SecurityMonitor({}), response = deferred<Response>();
+  const f = await opened(call => call.method === 'PUT' ? response.promise : undefined, monitor);
+  f.session.edit(changed(f.session.snapshot().ledger!, '123.00'));
+  const locking = f.session.lock(); const put = await requestStarted(f.calls, 'PUT');
+  monitor.reportFailure('SERVICE_LOCKED');
+  assert.equal(put.signal?.aborted, true); assert.equal(await locking, false);
+  response.resolve(Response.json({ epoch: 2, revision: 1 }));
+  f.session.dispose(); await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(f.calls.filter(call => ['account/lock', 'auth/logout'].includes(call.path)).length, 0);
+  assert.equal(f.session.snapshot().ledger, undefined); assert.equal(f.api.isAuthenticated(), false);
+});
+
+test('backend incident responses activate the global gate even without optional status polling', async () => {
+  for (const code of ['SERVICE_LOCKED', 'SECURITY_STATE_UNAVAILABLE']) {
+    const monitor = new SecurityMonitor({});
+    const f = await opened(call => call.method === 'PUT' ? Response.json({ code }, { status: 503 }) : undefined, monitor);
+    f.session.edit(changed(f.session.snapshot().ledger!)); await f.session.flush();
+    assert.equal(monitor.snapshot().phase, code === 'SERVICE_LOCKED' ? 'locked' : 'unavailable');
+    assert.equal(f.session.snapshot().ledger, undefined); assert.equal(f.api.isAuthenticated(), false); f.session.dispose();
+  }
+});
+
+test('ordinary tab suspension preserves the bounded encrypted save without treating checking as an incident', async () => {
+  const monitor = new SecurityMonitor({ securityGateRequired: true, securityStatusUrl: 'https://security.example.test/api/service/status' },
+    (async () => Response.json({ schemaVersion: 1, state: 'open', generation: 1 })) as typeof fetch);
+  await monitor.check();
+  const f = await opened(undefined, monitor);
+  f.session.edit(changed(f.session.snapshot().ledger!, '765.43'));
+  monitor.pause(); assert.equal(monitor.snapshot().phase, 'checking');
+  assert.equal(await f.session.lock(), true);
+  assert.equal(f.session.snapshot().phase, 'locked'); assert.equal(f.session.snapshot().ledger, undefined);
+  assert.equal(f.api.isAuthenticated(), true); assert.equal(f.calls.filter(c => c.method === 'PUT').length, 1);
+  await monitor.check(); await f.session.open('1234');
+  assert.equal(f.session.snapshot().phase, 'ready');
+  assert.equal(f.session.snapshot().ledger!.months[0].periods[0].realistic.payroll, '765.43');
+  f.session.dispose();
 });

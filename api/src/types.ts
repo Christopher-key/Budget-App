@@ -9,7 +9,7 @@ export interface Verifier { salt: string; hash: string }
 export interface AccountCredentials {
   salt: string; wrappedKey: CipherBlob; verifier: Verifier;
 }
-export interface AccountSession { hash: string; issuedAt: number; expiresAt: number }
+export interface AccountSession { hash: string; issuedAt: number; expiresAt: number; securityGeneration?: number }
 export interface AccessRecord {
   id: 'access'; ownerId: string; state: 'new' | 'locked' | 'erased'; epoch: number;
   version: number; revision: number; credentials?: AccountCredentials; sessions?: AccountSession[];
@@ -23,4 +23,4 @@ export interface Repository {
     ledger: LedgerRecord | null | undefined): Promise<boolean>;
   consumeRate(bucket: string, limit: number, windowMs: number, now: number): Promise<boolean>;
 }
-export interface Identity { ownerId: string; sessionHash: string }
+export interface Identity { ownerId: string; sessionHash: string; securityGeneration?: number }

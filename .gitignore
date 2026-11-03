@@ -7,6 +7,7 @@ xcuserdata/
 *.ipa
 *.dSYM/
 node_modules/
+__pycache__/
 
 # Device/runtime data must never be committed.
 settings.plist
@@ -41,3 +42,8 @@ test-results/
 playwright-report/
 *.tsbuildinfo
 local.settings.json
+
+# Private Azure deployment inputs and administrator recovery enrollment.
+*.parameters.json
+duo-client-secret*
+admin-passcode*

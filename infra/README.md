@@ -243,3 +243,13 @@ repository tests use synthetic accounts only. ARM what-if, paid resource creatio
 managed-identity propagation, package startup, billing, and live Azure access must
 be verified in your subscription; they are not implied by a successful local test
 or Static Web App deployment.
+
+## Optional incident lockdown and access guardrails
+
+See [the incident operations guide](LOCKDOWN-OPERATIONS.md) for the separate
+security controller, manually reviewed recovery, optional high-severity alert
+adapter and resource-property policy baseline. These files are off by default
+and are not deployed by CI. Additional execution/storage or identity-provider
+charges require review before owner-side provisioning. The emergency Azure CLI
+path does not enforce the separately hosted administrator passcode/phone MFA
+requested for normal recovery; that authentication boundary needs its own setup.

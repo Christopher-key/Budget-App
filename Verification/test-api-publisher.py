@@ -32,7 +32,7 @@ if args[:2] == ['account', 'show']:
     assert option('--query') == 'id'
     print('11111111-2222-3333-4444-555555555555')
 elif args[:3] == ['deployment', 'group', 'show']:
-    assert option('--name') == 'budget-backend'
+    assert option('--name') == os.environ.get('FAKE_DEPLOYMENT_NAME', 'budget-backend')
     assert 'parameters' not in option('--query')
     assert 'properties.outputs' in option('--query')
     print(json.dumps({'state': 'Failed' if mode == 'deployment-failed' else 'Succeeded',
@@ -42,6 +42,8 @@ elif args[:2] == ['storage', 'blob']:
     assert option('--container-name') == 'function-packages'
     if mode == 'exists-forbidden' and args[2] == 'exists':
         fail('AuthorizationPermissionMismatch Bearer synthetic-sensitive-token')
+    if mode == 'english-forbidden' and args[2] == 'exists':
+        fail('You do not have the required permissions needed to perform this operation. Bearer synthetic-sensitive-token')
     blob = root / 'remote.zip'
     if args[2] == 'exists':
         print('true' if blob.exists() else 'false')
@@ -66,7 +68,7 @@ elif args[:2] == ['storage', 'blob']:
         fail('Unexpected blob operation')
 elif args[:4] == ['functionapp', 'config', 'appsettings', 'set']:
     assert option('--output') == 'none'
-    assert option('--settings') == 'WEBSITE_RUN_FROM_PACKAGE=https://syntheticstore.blob.core.windows.net/function-packages/release-001.zip'
+    assert option('--settings') == 'WEBSITE_RUN_FROM_PACKAGE=https://syntheticstore.blob.core.windows.net/function-packages/' + os.environ.get('FAKE_RELEASE_BLOB', 'release-001.zip')
     if mode == 'settings-fail': fail('synthetic private server configuration must not be printed')
 elif args[:2] == ['functionapp', 'restart']:
     assert option('--output') == 'none'
@@ -158,7 +160,7 @@ class PublisherTests(unittest.TestCase):
             '--package', str(package or self.package),
         ], env=env, capture_output=True, text=True, timeout=15)
 
-    def run_github_publisher(self, *, mode='normal', release=None):
+    def run_github_publisher(self, *, mode='normal', release=None, extra=None, deployment=None, blob=None):
         (self.state / 'mode').write_text(mode)
         curl = self.bin / 'curl'
         curl.write_text(FAKE_CURL)
@@ -169,10 +171,30 @@ class PublisherTests(unittest.TestCase):
             executable.chmod(0o700)
         env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ['PATH'],
                    FAKE_AZ_STATE=str(self.state), FAKE_CURL_PACKAGE=str(self.package))
+        if deployment:
+            env['FAKE_DEPLOYMENT_NAME'] = deployment
+        if blob:
+            env['FAKE_RELEASE_BLOB'] = blob
         return subprocess.run([
             'bash', str(GITHUB_PUBLISHER), '--subscription', SUBSCRIPTION,
             '--resource-group', 'synthetic-group', '--release', release or 'api-build-' + 'a' * 40,
-        ], env=env, capture_output=True, text=True, timeout=15)
+        ] + (extra or []), env=env, capture_output=True, text=True, timeout=15)
+
+    def test_controller_deployment_and_new_immutable_release_can_be_selected(self):
+        result = self.run_github_publisher(
+            extra=['--deployment-name', 'budget-security', '--blob-name', 'security-release-002.zip'],
+            deployment='budget-security', blob='security-release-002.zip')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('API package published.', result.stdout)
+        upload = next(call for call in self.calls() if call[:3] == ['storage', 'blob', 'upload'])
+        self.assertEqual(upload[upload.index('--name') + 1], 'security-release-002.zip')
+        self.assertEqual(upload[upload.index('--overwrite') + 1], 'false')
+
+    def test_unsafe_controller_deployment_or_release_names_are_rejected(self):
+        for extra in [['--deployment-name', '../other'], ['--blob-name', '../private.zip']]:
+            result = self.run_github_publisher(extra=extra)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(self.calls(), [])
 
     def assert_no_function_mutation(self):
         self.assertFalse(any(call[0] in ['functionapp', 'rest'] for call in self.calls()))
@@ -229,7 +251,7 @@ class PublisherTests(unittest.TestCase):
         self.assertFalse(any(call[:3] == ['storage', 'blob', 'upload'] for call in self.calls()))
 
     def test_permission_failures_hide_diagnostics_and_do_not_change_function(self):
-        for mode in ['exists-forbidden', 'upload-forbidden']:
+        for mode in ['exists-forbidden', 'upload-forbidden', 'english-forbidden']:
             with self.subTest(mode=mode):
                 result = self.run_publisher(mode=mode)
                 self.assertNotEqual(result.returncode, 0)

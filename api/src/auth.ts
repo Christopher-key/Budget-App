@@ -41,18 +41,19 @@ export class AuthenticationService {
     return { accountId: ownerId, salt: snapshot.access?.credentials?.salt
       ?? keyedHash(this.config.lookupKey, 'unused-salt', name), iterations: PASSWORD_ITERATIONS };
   }
-  private issue(access: AccessRecord): { access: AccessRecord; response: AuthResponse } {
+  private issue(access: AccessRecord, securityGeneration = 0): { access: AccessRecord; response: AuthResponse } {
     const secret = random(), token = access.ownerId + '.' + secret;
     const issuedAt = this.now(), expiresAt = issuedAt + 30 * 60_000;
-    const sessions = (access.sessions ?? []).filter(session => session.expiresAt > issuedAt).slice(-15);
-    sessions.push({ hash: digest(token), issuedAt, expiresAt });
+    const sessions = (access.sessions ?? []).filter(session => session.expiresAt > issuedAt
+      && (session.securityGeneration ?? 0) === securityGeneration).slice(-15);
+    sessions.push({ hash: digest(token), issuedAt, expiresAt, securityGeneration });
     return { access: { ...access, sessions, version: access.version + 1 }, response: {
       token, expiresAt: new Date(expiresAt).toISOString(), accountId: access.ownerId,
       salt: access.credentials!.salt, wrappedKey: structuredClone(access.credentials!.wrappedKey),
     } };
   }
   async register(input: { username?: unknown; proof?: unknown; salt?: unknown; wrappedKey?: unknown },
-    source = 'unavailable'): Promise<AuthResponse> {
+    source = 'unavailable', securityGeneration = 0): Promise<AuthResponse> {
     const name = username(input.username); proof(input.proof);
     if (!base64url(input.salt, 32)) throw new ApiError(400, 'INVALID_DATA');
     const wrappedKey = cipher(input.wrappedKey, true);
@@ -64,12 +65,12 @@ export class AuthenticationService {
       const access: AccessRecord = { id: 'access', ownerId, state: 'new', epoch: (snapshot.access?.epoch ?? 0) + 1,
         version: (snapshot.access?.version ?? 0) + 1, revision: 0,
         credentials: { salt: input.salt, wrappedKey, verifier: saved }, sessions: [] };
-      const issued = this.issue(access);
+      const issued = this.issue(access, securityGeneration);
       if (await this.repository.commit(ownerId, snapshot.etag, issued.access, undefined)) return issued.response;
     }
     throw new ApiError(503, 'UNAVAILABLE');
   }
-  async login(input: { username?: unknown; proof?: unknown }, source = 'unavailable'): Promise<AuthResponse> {
+  async login(input: { username?: unknown; proof?: unknown }, source = 'unavailable', securityGeneration = 0): Promise<AuthResponse> {
     const name = username(input.username); proof(input.proof); await this.rate('login', name, source);
     const ownerId = this.owner(name), original = await this.repository.read(ownerId, false);
     // Unknown accounts perform the same memory-hard operation; no fake auth succeeds.
@@ -82,18 +83,18 @@ export class AuthenticationService {
       if (!access?.credentials || access.state === 'erased' ||
           !constantEqual(saved.hash, access.credentials.verifier.hash) ||
           !constantEqual(saved.salt, access.credentials.verifier.salt)) throw new ApiError(401, 'INVALID_LOGIN');
-      const issued = this.issue(access);
+      const issued = this.issue(access, securityGeneration);
       if (await this.repository.commit(ownerId, snapshot.etag, issued.access, undefined)) return issued.response;
     }
     throw new ApiError(503, 'UNAVAILABLE');
   }
-  async authenticate(headers: Pick<Headers, 'get'>): Promise<Identity> {
+  async authenticate(headers: Pick<Headers, 'get'>, securityGeneration = 0): Promise<Identity> {
     const match = /^Bearer ([A-Za-z0-9_-]{43})\.([A-Za-z0-9_-]{43})$/.exec(headers.get('authorization') ?? '');
     if (!match || !base64url(match[1], 32) || !base64url(match[2], 32)) throw new ApiError(401, 'AUTH_REQUIRED');
     const ownerId = match[1], sessionHash = digest(match[1] + '.' + match[2]);
     const { access } = await this.repository.read(ownerId, false);
-    requireSession(access, { ownerId, sessionHash }, this.now());
-    return { ownerId, sessionHash };
+    requireSession(access, { ownerId, sessionHash, securityGeneration }, this.now());
+    return { ownerId, sessionHash, securityGeneration };
   }
   async logout(identity: Identity): Promise<void> {
     for (let retry = 0; retry < 32; retry++) {

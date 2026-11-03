@@ -1,9 +1,9 @@
 # Web account security and privacy
 
 This describes the app-owned account and encrypted-sync design implemented in
-this repository. It is not a claim that the Azure backend has been deployed or
-that any hosting provider can give an unconditional "no AI will ever see data"
-guarantee. Deployment and independent security review remain separate steps.
+this repository. Enabled controls depend on the deployed code and configuration;
+source changes alone do not activate optional security features. No hosting
+provider can give an unconditional "no AI will ever see data" guarantee.
 
 ## What is kept where
 
@@ -103,9 +103,92 @@ Apps deployment token from GitHub Secrets. That token can update the website,
 which is why repository/workflow administration remains part of the software
 trust boundary. It is not a budget-app user password or database credential.
 
-The Azure explicit-deny policies and live role audit are deferred to the owner's
-hosting setup session. The infrastructure template's scoped grants do not imply
-that those additional policies already exist in the subscription.
+Optional resource-scoped Azure Policy templates and an access-audit helper are
+included in `infra/`. Policy assignments default to `DoNotEnforce`; compiling or
+committing them does not enable live denial. Check the resource-provider aliases
+and compliance results before opting into enforcement. Azure Policy can reject
+unsafe resource settings, such as enabling shared storage keys; it cannot
+recognize every AI client or cancel every existing administrator permission.
+
+## Site-wide lockdown and recovery
+
+The optional lockdown feature is disabled until its independent control service
+is deployed and explicitly configured. Deploying a new website build alone does
+not activate it. See [the operations guide](infra/LOCKDOWN-OPERATIONS.md) for the
+staged activation procedure and the additional Azure resources.
+
+The control record lives in a separate storage account. The budget API's managed
+identity can read that record but cannot update it. With enforcement enabled,
+every account/budget route checks control state before doing work and before
+returning success. Missing, invalid or unreadable control state denies access.
+A separate controller publishes a small public status document containing only
+the state and generation. It has no budget database role or financial keys.
+It can lock the control and stop the budget Function App; it has no permission
+to start that app. This provides an independent stop operation even if a change
+to the budget API were to ignore its software gate.
+
+Automatic lockdown is optional and rejects requests until its trusted alert
+source is configured. The alert adapter requires authenticated, approved security
+alerts; public password failures and ordinary metric alerts do not trigger a
+site-wide outage. An alert is a reason to pause and investigate, not proof that
+financial data was accessed. Resolved alerts never reopen the service.
+
+Lockdown clears the web app's displayed ledger, encryption-key references,
+session tokens and pending financial writes when the browser detects it. That
+path does not flush a save, export records, or erase an account. Status polling
+and checks on visibility changes do not make a disconnected browser remotely
+erasable. A request admitted before the flag changes may still finish writing;
+the control and budget records are not one distributed transaction. Stopping
+Azure Functions also has propagation time. Copies already exported, downloaded,
+photographed or exfiltrated cannot be recalled by this feature.
+
+An authorized operator can manually lock, mark an incident confirmed, or reopen
+after recording `false-positive` or `remediated`. Confirmation alone keeps the
+service stopped. Recovery uses a fresh control generation and conditional writes
+to avoid overwriting a simultaneous incident. Old sessions and unlock grants
+cannot resume after reopening; users must sign in again. A generation change
+does not alter or delete users' encrypted financial records.
+
+The current operator CLI uses the operator's Azure identity. It is an emergency
+administrative path, **not an independently enforced MFA portal**. Merely checking
+a phone code in a local script would be bypassable by someone with the same
+Azure permissions. Do not publish a numeric-code-only recovery endpoint.
+
+The requested next recovery layer is a permanent 8–12 digit **administrator**
+passcode plus MFA enforced outside Azure. **Duo is a candidate only if its required
+integration is free on both the service and user sides beyond any trial.** Until
+that is verified, leave it unconnected and choose another approach if it charges.
+These are separate from
+users' four-digit app locks. Prefer 12 randomly chosen digits and provider-side
+attempt limits; do not store the passcode or phone authenticator secret in Azure,
+GitHub, logs or source. Duo retains the second-factor enrollment. A separately
+protected primary identity service or recovery portal must verify the permanent
+passcode; Duo MFA alone is not a password store. To keep both secrets out of
+Azure, that primary verifier must also be hosted independently. The external
+recovery service would issue short-lived signed approvals. Azure would
+hold public verification keys and narrowly scoped issuer/audience/operator
+configuration. Recovery approval must be bound to the incident, generation,
+action and expiry, with replay prevention and fresh MFA enforcement. Provider
+enrollment and that approval integration are not implemented by the current CLI.
+See [Duo recovery preparation](infra/DUO-RECOVERY.md). No admin passcode, MFA seed
+or third-party account has been created.
+
+Authenticator apps can generate codes without a subscription or SMS fee, and
+GitHub offers account 2FA without a separate MFA license. Neither alone enforces
+MFA on this recovery path. An independent hosted identity provider may charge
+for enforced MFA. Open-source identity systems have no software-license fee but
+need separate hosting, updates and recovery operations. Verify the selected
+provider's current MFA entitlement before activation; this repository does not
+assume a particular Duo integration is included in a free plan. The optional
+controller and storage are also subject to Azure usage charges; reusing the
+existing plan does not guarantee a zero bill.
+
+Any owner able to change Azure roles, controller code or served JavaScript can
+bypass controls hosted under that ownership. External MFA improves separation
+but does not by itself survive a fully compromised Azure Owner account. Limit
+standing owner permissions, protect deployment accounts and retain an
+independently protected incident-recovery process. These policies and the
+lockdown mechanism are not a guarantee against every sophisticated attack.
 
 ## Deletion and recovery
 

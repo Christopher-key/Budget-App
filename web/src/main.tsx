@@ -5,6 +5,8 @@ import { applySchedule, bucketBalances, categoryWarnings, emptyPlan, expenseCate
 import { exportWorkbook } from '../../shared/xlsx.js';
 import { authenticate, validatePublicConfig, type PublicConfig } from './auth.js';
 import { BudgetApi, BudgetSession } from './api.js';
+import { LOCKDOWN_MESSAGE, SECURITY_UNAVAILABLE_MESSAGE } from '../../shared/security.js';
+import { SecurityMonitor } from './security.js';
 import './style.css';
 
 type Page = 'home' | 'budget' | 'transactions' | 'trends' | 'goals' | 'settings';
@@ -186,7 +188,7 @@ function SetupScreen({ error = '' }: { error?: string }) {
   </main>;
 }
 
-function AccountLogin({ config, onSignIn }: { config: PublicConfig; onSignIn: (session: BudgetSession) => void }) {
+function AccountLogin({ config, security, onSignIn }: { config: PublicConfig; security: SecurityMonitor; onSignIn: (session: BudgetSession) => void }) {
   const [create, setCreate] = useState(false), [username, setUsername] = useState('');
   const [password, setPassword] = useState(''), [confirmation, setConfirmation] = useState('');
   const [busy, setBusy] = useState(false), [error, setError] = useState('');
@@ -196,12 +198,12 @@ function AccountLogin({ config, onSignIn }: { config: PublicConfig; onSignIn: (s
     event.preventDefault();
     if (busy) return;
     if (create && password !== confirmation) { setError('The passwords do not match.'); return; }
-    const version = generation.current;
+    const version = generation.current, serviceVersion = security.snapshot().version;
     setBusy(true); setError('');
     try {
-      const auth = await authenticate(config, username, password, create);
-      const session = new BudgetSession(new BudgetApi(config, auth));
-      if (version !== generation.current) { session.dispose(); return; }
+      const auth = await authenticate(config, username, password, create, fetch.bind(globalThis), security);
+      const session = new BudgetSession(new BudgetApi(config, auth, fetch.bind(globalThis), security));
+      if (version !== generation.current || security.snapshot().phase !== 'open' || security.snapshot().version !== serviceVersion) { session.emergencyDiscard(); return; }
       setPassword(''); setConfirmation('');
       onSignIn(session);
     } catch (cause) {
@@ -230,7 +232,6 @@ function AccountLogin({ config, onSignIn }: { config: PublicConfig; onSignIn: (s
 
 function App() {
   const [config, setConfig] = useState<PublicConfig | null>(null);
-  const [session, setSession] = useState<BudgetSession | null>(null);
   const [loading, setLoading] = useState(true), [error, setError] = useState('');
   useEffect(() => {
     const controller = new AbortController();
@@ -246,11 +247,39 @@ function App() {
     })();
     return () => controller.abort();
   }, []);
-  function signOut() { session?.dispose(); setSession(null); }
   if (loading) return <main className="entry-shell"><div className="entry-card"><div className="brand-mark">B</div><p role="status">Preparing your private money space…</p></div></main>;
   if (!config) return <SetupScreen error={error}/>;
-  if (session) return <BudgetApp session={session} signOut={signOut}/>;
-  return <AccountLogin config={config} onSignIn={setSession}/>;
+  return <ConnectedApp config={config}/>;
+}
+
+function ConnectedApp({ config }: { config: PublicConfig }) {
+  const [security] = useState(() => new SecurityMonitor(config));
+  const service = useSyncExternalStore(security.subscribe, security.snapshot);
+  const [session, setSession] = useState<BudgetSession | null>(null);
+  const current = useRef(session); current.current = session;
+  useEffect(() => {
+    let version = security.snapshot().version;
+    const unsubscribe = security.subscribe(() => {
+      const state = security.snapshot();
+      if (state.phase === 'locked' || state.phase === 'unavailable' || state.version !== version) {
+        // Normal visibility checks retain the bounded encrypted save; incidents never do.
+        current.current?.emergencyDiscard(); current.current = null; setSession(null);
+      }
+      version = state.version;
+    });
+    const stop = security.start();
+    return () => { unsubscribe(); stop(); current.current?.emergencyDiscard(); };
+  }, [security]);
+  function signOut() { session?.dispose(); current.current = null; setSession(null); }
+  return <>{service.phase !== 'open' && <main className="entry-shell"><section className="entry-card">
+    <div className="brand-mark">B</div><p className="eyebrow">Your private budget</p>
+    <h1>{service.phase === 'locked' ? 'Service temporarily locked' : service.phase === 'checking' ? 'Checking service security' : 'Service temporarily unavailable'}</h1>
+    <p role="status" className="muted">{service.phase === 'locked' ? LOCKDOWN_MESSAGE : service.phase === 'checking' ? 'Please wait while we verify that access is available.' : SECURITY_UNAVAILABLE_MESSAGE}</p>
+    {service.phase !== 'checking' && <button className="primary full" onClick={() => { if (config.securityGateRequired) void security.check(); else window.location.reload(); }}>Check again</button>}
+  </section></main>}
+  {session ? <div hidden={service.phase !== 'open'}><BudgetApp session={session} signOut={signOut}/></div>
+    : service.phase === 'open' && <AccountLogin key={service.version} config={config} security={security} onSignIn={setSession}/>}
+  </>;
 }
 
 createRoot(document.getElementById('root')!).render(<App/>);

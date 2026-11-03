@@ -9,6 +9,9 @@ import { createHandler, type Route } from '../api/src/functions.js';
 import { authenticate } from '../web/src/auth.js';
 import { BudgetApi, BudgetSession } from '../web/src/api.js';
 import type { Ledger } from '../shared/contracts.js';
+import type { SecurityGate } from '../shared/security.js';
+import { ApiError } from '../api/src/types.js';
+import { SecurityMonitor } from '../web/src/security.js';
 
 const origin = 'https://budget.example.test';
 const config = { configured: true as const, apiBaseUrl: 'https://api.example.test' };
@@ -19,13 +22,13 @@ const routes: Record<string, Route> = {
   account: 'erase', budget: 'budget',
 };
 
-function fixture() {
+function fixture(gate?: SecurityGate) {
   process.env.APP_ORIGIN = origin;
   const repository = new MemoryRepository();
   const secrets = { lookupKey: randomBytes(32).toString('base64url'), pepper: randomBytes(32).toString('base64url') };
   const authentication = new AuthenticationService(repository, secrets);
   const service = new BudgetService(repository, Date.now, secrets.pepper);
-  const handle = createHandler(() => ({ authentication, service }));
+  const handle = createHandler(() => ({ authentication, service }), gate ? () => gate : undefined);
   const requests: { path: string; method: string; headers: Headers; body: string }[] = [];
   const fetcher: typeof fetch = async (input, init) => {
     const url = new URL(String(input)), path = url.pathname.replace(/^\/api\//, '');
@@ -93,6 +96,58 @@ test('real browser crypto and API sync two devices, then third wrong PIN revokes
     assert.equal(late.status, 401);
     assert.equal((await repository.read(authA.accountId)).ledger, null);
   } finally { deviceA.dispose(); deviceB?.dispose(); }
+});
+
+test('site lockdown clears two web sessions without deleting encrypted budgets and recovery rejects their old credentials', async () => {
+  let locked = false, generation = 1;
+  const gate: SecurityGate = {
+    async check(expected) {
+      if (locked) throw new ApiError(503, 'SERVICE_LOCKED');
+      if (expected !== undefined && expected !== generation) throw new ApiError(401, 'AUTH_REQUIRED');
+      return generation;
+    },
+    async status() { return { schemaVersion: 1, state: locked ? 'locked' : 'open', generation }; },
+  };
+  const { repository, fetcher } = fixture(gate);
+  const username = 'synthetic-lockdown-check', password = 'Example-only password 8163!';
+  const securityA = new SecurityMonitor({}), securityB = new SecurityMonitor({});
+  const authA = await authenticate(config, username, password, true, fetcher, securityA);
+  const oldBearer = authA.accessToken;
+  const deviceA = new BudgetSession(new BudgetApi(config, authA, fetcher, securityA));
+  let deviceB: BudgetSession | undefined, recovered: BudgetSession | undefined;
+  try {
+    await deviceA.checkStatus(); await deviceA.open('3141', true);
+    const edited = structuredClone(deviceA.snapshot().ledger!);
+    edited.months[0].periods[0].realistic.payroll = '1234.56';
+    deviceA.edit(edited); await deviceA.flush();
+    const authB = await authenticate(config, username, password, false, fetcher, securityB);
+    deviceB = new BudgetSession(new BudgetApi(config, authB, fetcher, securityB));
+    await deviceB.checkStatus(); await deviceB.open('3141');
+    const before = await repository.read(authA.accountId);
+
+    locked = true; generation = 2;
+    await deviceA.checkStatus(); await deviceB.checkStatus();
+    for (const [device, monitor] of [[deviceA, securityA], [deviceB, securityB]] as const) {
+      assert.equal(monitor.snapshot().phase, 'locked');
+      assert.equal(device.snapshot().ledger, undefined);
+      assert.equal(device.api.isAuthenticated(), false);
+    }
+    const during = await repository.read(authA.accountId);
+    assert.deepEqual(during.ledger, before.ledger, 'global incident control does not erase financial records');
+    assert.ok(during.access?.credentials, 'global control is separate from three-wrong-PIN account erasure');
+
+    locked = false; generation = 3;
+    const stale = await fetcher(config.apiBaseUrl + '/api/account/status', {
+      headers: { Authorization: 'Bearer ' + oldBearer }, credentials: 'omit', cache: 'no-store',
+    });
+    assert.equal(stale.status, 401);
+    const fresh = await authenticate(config, username, password, false, fetcher);
+    recovered = new BudgetSession(new BudgetApi(config, fresh, fetcher));
+    await recovered.checkStatus(); await recovered.open('3141');
+    assert.equal(recovered.snapshot().phase, 'ready');
+    assert.equal(recovered.snapshot().ledger!.months[0].periods[0].realistic.payroll, '1234.56');
+    assert.deepEqual((await repository.read(authA.accountId)).ledger, before.ledger);
+  } finally { deviceA.dispose(); deviceB?.dispose(); recovered?.dispose(); }
 });
 
 test('three wrong public account passwords leave the encrypted budget and PIN failure counter intact', async () => {

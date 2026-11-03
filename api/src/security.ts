@@ -29,7 +29,8 @@ export function counter(value: unknown): asserts value is number {
 export function requireSession(access: AccessRecord | null, identity: Identity, now: number): AccessRecord {
   if (!access || access.ownerId !== identity.ownerId || access.state === 'erased' ||
       !access.credentials || !access.sessions?.some(session => constantEqual(session.hash, identity.sessionHash)
-        && session.expiresAt > now && session.issuedAt <= now + 30_000)) throw new ApiError(401, 'AUTH_REQUIRED');
+        && session.expiresAt > now && session.issuedAt <= now + 30_000
+        && (session.securityGeneration ?? 0) === (identity.securityGeneration ?? 0))) throw new ApiError(401, 'AUTH_REQUIRED');
   return access;
 }
 export function serverSecret(value: string | undefined): string {

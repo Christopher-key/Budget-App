@@ -111,7 +111,7 @@ fail_azure() {
   local operation=$1 details='' code=''
   if [[ -f "$error_file" ]]; then details=$(<"$error_file"); fi
   case "$details" in
-    *AuthorizationPermissionMismatch*|*AuthorizationFailed*|*AuthorizationFailure*|*Forbidden*|*403*)
+    *AuthorizationPermissionMismatch*|*AuthorizationFailed*|*AuthorizationFailure*|*Forbidden*|*403*|*"You do not have the required permissions"*)
       printf 'Azure denied permission to %s.\n' "$operation" >&2
       echo 'Publishing needs Blob Data Contributor on the function-packages container and Website Contributor on this Function App. New grants can take time to apply.' >&2
       ;;

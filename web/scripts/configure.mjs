@@ -4,6 +4,7 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 mkdirSync(root + 'public', { recursive: true });
 // Only a public API origin is exposed to the browser. Secrets are backend-only.
 const apiText = process.env.VITE_API_BASE_URL?.trim() ?? '';
+const statusText = process.env.VITE_SECURITY_STATUS_URL?.trim() ?? '';
 let config = { configured: false };
 let connect = "'self'";
 if (apiText) {
@@ -18,6 +19,16 @@ if (apiText) {
   }
   config = { configured: true, apiBaseUrl: api.origin };
   connect += ` ${api.origin}`;
+}
+if (statusText) {
+  let status;
+  try { status = new URL(statusText); }
+  catch { throw new Error('Provide a valid independent security status URL.'); }
+  if (!apiText || status.protocol !== 'https:' || status.username || status.password || status.search || status.hash || status.pathname !== '/api/service/status') {
+    throw new Error('Provide the independent HTTPS /api/service/status endpoint without credentials or query parameters.');
+  }
+  config = { ...config, securityGateRequired: true, securityStatusUrl: status.href };
+  if (!connect.split(' ').includes(status.origin)) connect += ` ${status.origin}`;
 }
 writeFileSync(root + 'public/config.json', JSON.stringify(config));
 const policy = `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ${connect}; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests`;

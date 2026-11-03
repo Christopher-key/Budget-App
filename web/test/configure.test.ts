@@ -5,13 +5,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-function configure(api?: string, production = true) {
+function configure(api?: string, production = true, status?: string) {
   const directory = mkdtempSync(join(tmpdir(), 'budget-config-test-'));
   mkdirSync(join(directory, 'scripts'));
   copyFileSync(new URL('../scripts/configure.mjs', import.meta.url), join(directory, 'scripts/configure.mjs'));
   const env = { ...process.env };
   delete env.VITE_API_BASE_URL;
   delete env.NODE_ENV;
+  delete env.VITE_SECURITY_STATUS_URL;
+  if (status !== undefined) env.VITE_SECURITY_STATUS_URL = status;
   if (api !== undefined) env.VITE_API_BASE_URL = api;
   try {
     execFileSync(process.execPath, [join(directory, 'scripts/configure.mjs'), ...(production ? ['--production'] : [])], { env, stdio: 'pipe' });
@@ -49,4 +51,14 @@ test('a malformed public setting is rejected without echoing its contents', () =
     assert.doesNotMatch(String((error as { stderr?: Buffer }).stderr), /private-value/);
     return true;
   });
+});
+
+
+test('independent controller is optional, requires its exact HTTPS status path and adds only its origin to CSP', () => {
+  const status = 'https://budget-security.example.test/api/service/status';
+  const { config, hosting } = configure('https://budget-api.example.test', true, status);
+  assert.deepEqual(config, { configured: true, apiBaseUrl: 'https://budget-api.example.test', securityGateRequired: true, securityStatusUrl: status });
+  assert.match(hosting.globalHeaders['Content-Security-Policy'], /connect-src 'self' https:\/\/budget-api\.example\.test https:\/\/budget-security\.example\.test;/);
+  for (const invalid of ['http://localhost:7072/api/service/status', 'https://example.test/', 'https://user:secret@example.test/api/service/status', status + '?secret=value', status + '#secret']) assert.throws(() => configure('https://budget-api.example.test', true, invalid));
+  assert.throws(() => configure(undefined, true, status));
 });

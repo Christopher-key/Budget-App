@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { authenticate, AuthError, validatePublicConfig, type PublicConfig } from '../src/auth.js';
+import { SecurityMonitor, ServiceSecurityError } from '../src/security.js';
 import { createDataKey, encode, passwordKeys, randomSalt } from '../src/crypto.js';
 
 const config: PublicConfig = { configured: true, apiBaseUrl: 'https://budget-api.example.test' };
@@ -66,4 +67,37 @@ test('token replies must match the requested account, salt, expiry, and encrypte
   for (const response of [{ ...base, salt: randomSalt() }, { ...base, accountId: encode(new Uint8Array(32).fill(8)) }, { ...base, token: 'unbound-token' }, { ...base, expiresAt: new Date(Date.now() - 1).toISOString() }, { ...base, expiresAt: new Date(Date.now() + 7_200_000).toISOString() }, { ...base, wrappedKey: { ...wrappedKey, data: encode(new Uint8Array(16)) } }]) {
     await assert.rejects(authenticate(config, 'test-user', password, false, (async (url) => Response.json(String(url).endsWith('parameters') ? { accountId, salt, iterations: 600_000 } : response)) as typeof fetch));
   }
+});
+
+
+test('an in-flight account response cannot restore authentication after global lockdown', async () => {
+  const remote = server(), monitor = new SecurityMonitor({});
+  let release!: () => void, started!: () => void;
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  const wait = new Promise<void>(resolve => { release = resolve; });
+  let signal: AbortSignal | null | undefined;
+  const fetcher = (async (url, init) => {
+    const reply = await remote.fetcher(url, init);
+    if (String(url).endsWith('register')) { signal = init?.signal; started(); await wait; }
+    return reply;
+  }) as typeof fetch;
+  const authenticating = authenticate(config, 'synthetic-user', password, true, fetcher, monitor);
+  await ready; monitor.reportFailure('SERVICE_LOCKED'); assert.equal(signal?.aborted, true); release();
+  await assert.rejects(authenticating, (error: ServiceSecurityError) => error.code === 'SERVICE_LOCKED');
+  assert.equal(monitor.snapshot().phase, 'locked');
+});
+
+test('backend global-denial responses are preserved and notify the shared monitor during login', async () => {
+  const monitor = new SecurityMonitor({});
+  await assert.rejects(authenticate(config, 'synthetic-user', password, false,
+    (async () => Response.json({ code: 'SERVICE_LOCKED', debug: 'sensitive' }, { status: 503 })) as typeof fetch, monitor),
+    (error: ServiceSecurityError) => error.code === 'SERVICE_LOCKED' && !error.message.includes('sensitive'));
+  assert.equal(monitor.snapshot().phase, 'locked');
+});
+
+test('public status settings fail closed when required but missing or not an exact HTTPS endpoint', () => {
+  for (const settings of [{ securityGateRequired: true }, { securityGateRequired: true, securityStatusUrl: 'http://security.test/api/service/status' },
+      { securityGateRequired: true, securityStatusUrl: 'https://security.test/status' }, { securityStatusUrl: 'https://security.test/api/service/status' },
+      { securityGateRequired: 'yes' }]) assert.equal(validatePublicConfig({ ...config, ...settings }), null);
+  assert.equal(validatePublicConfig({ ...config, securityGateRequired: true, securityStatusUrl: 'https://security.test/api/service/status' })?.securityGateRequired, true);
 });

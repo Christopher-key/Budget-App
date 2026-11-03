@@ -1,6 +1,9 @@
 import { isIP } from 'node:net';
 import { app, type HttpRequest, type HttpResponseInit } from '@azure/functions';
 import { UNLOCK_HEADER } from '../../shared/contracts.js';
+import type { SecurityGate } from '../../shared/security.js';
+import { BlobControlStore, BlobSecurityGate, LockdownController, controlBlobUrl, productionSecurityGate, stopBudgetApi, budgetResourceId } from './lockdown.js';
+import { alertConfig, alertVerifier, verifiedAlert, type AlertConfig } from './alerts.js';
 import { AuthenticationService, authenticationConfig } from './auth.js';
 import { productionRepository } from './repository.js';
 import { BudgetService } from './service.js';
@@ -14,6 +17,11 @@ const headers = {
 let repository: Repository | undefined;
 let service: BudgetService | undefined;
 let authentication: AuthenticationService | undefined;
+let gate: SecurityGate | undefined;
+function budgetGate() {
+  try { return gate ??= productionSecurityGate(); }
+  catch { throw new ApiError(503, 'SECURITY_STATE_UNAVAILABLE'); }
+}
 function services() {
   repository ??= productionRepository();
   service ??= new BudgetService(repository);
@@ -55,10 +63,12 @@ function source(request: HttpRequest): string {
 }
 
 export type Route = 'parameters' | 'register' | 'login' | 'logout' | 'status' | 'setup' | 'unlock' | 'lock' | 'pin' | 'erase' | 'budget';
-export function createHandler(resolve: () => { authentication: AuthenticationService; service: BudgetService } = services) {
+export function createHandler(resolve: () => { authentication: AuthenticationService; service: BudgetService } = services,
+  resolveGate: () => SecurityGate = budgetGate) {
  return async function handle(request: HttpRequest, route: Route): Promise<HttpResponseInit> {
   try {
     requireOrigin(request);
+    const security = resolveGate(), securityGeneration = await security.check();
     const publicRoute = ['parameters', 'register', 'login'].includes(route);
     // Reject malformed/missing credentials before opening database clients or bodies.
     if (!publicRoute && !/^Bearer [A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}$/.test(request.headers.get('authorization') ?? '')) {
@@ -69,11 +79,11 @@ export function createHandler(resolve: () => { authentication: AuthenticationSer
     if (publicRoute) {
       switch (route) {
       case 'parameters': value = await authentication.parameters(await body(request, ['username'], 1024), source(request)); break;
-      case 'register': value = await authentication.register(await body(request, ['username', 'proof', 'salt', 'wrappedKey'], 2048), source(request)); break;
-      case 'login': value = await authentication.login(await body(request, ['username', 'proof'], 1024), source(request)); break;
+      case 'register': value = await authentication.register(await body(request, ['username', 'proof', 'salt', 'wrappedKey'], 2048), source(request), securityGeneration); break;
+      case 'login': value = await authentication.login(await body(request, ['username', 'proof'], 1024), source(request), securityGeneration); break;
       }
     } else {
-      const identity = await authentication.authenticate(request.headers), token = request.headers.get(UNLOCK_HEADER) ?? undefined;
+      const identity = await authentication.authenticate(request.headers, securityGeneration), token = request.headers.get(UNLOCK_HEADER) ?? undefined;
       switch (route) {
       case 'logout': await body(request, [], 1024); await authentication.logout(identity); value = { signedOut: true }; break;
       case 'status': value = await service.status(identity); break;
@@ -86,6 +96,8 @@ export function createHandler(resolve: () => { authentication: AuthenticationSer
         : await service.save(identity, token, await body(request, ['epoch', 'revision', 'payload'])); break;
       }
     }
+    // A late lock suppresses response disclosure; already-admitted writes may finish.
+    await security.check(securityGeneration);
     return { status: 200, headers, jsonBody: value };
   } catch (error) {
     // Never log request bodies, usernames, proofs, PINs, tokens, ciphertext or SDK diagnostics.
@@ -95,8 +107,56 @@ export function createHandler(resolve: () => { authentication: AuthenticationSer
   }
 }
 }
-const handle = createHandler();
-for (const [name, route, methods, operation] of [
+export interface ControllerServices {
+  gate: SecurityGate;
+  controller: LockdownController;
+  alertConfig: () => AlertConfig;
+  verify: (authorization: string | null) => Promise<void>;
+}
+let controllerServices: ControllerServices | undefined;
+function securityServices(): ControllerServices {
+  if (controllerServices) return controllerServices;
+  const store = new BlobControlStore(controlBlobUrl(process.env.LOCKDOWN_BLOB_URL));
+  // Alert configuration is optional: status works before automation is configured.
+  let config: AlertConfig | undefined;
+  let verify: ReturnType<typeof alertVerifier> | undefined;
+  return controllerServices = { gate: new BlobSecurityGate(store),
+    controller: new LockdownController(store, stopBudgetApi(budgetResourceId(process.env.BUDGET_FUNCTION_RESOURCE_ID))),
+    alertConfig: () => config ??= alertConfig(),
+    verify: authorization => { config ??= alertConfig(); verify ??= alertVerifier(config); return verify(authorization); },
+  };
+}
+export function createControllerHandler(resolve: () => ControllerServices = securityServices) {
+  return async (request: HttpRequest, route: 'status' | 'alerts'): Promise<HttpResponseInit> => {
+    try {
+      if (route === 'status') {
+        requireOrigin(request);
+        const state = await resolve().gate.status();
+        return { status: state.state === 'unavailable' ? 503 : 200, headers, jsonBody: state };
+      }
+      const services = resolve();
+      await services.verify(request.headers.get('authorization'));
+      const config = services.alertConfig();
+      const value = await body(request, ['schemaId', 'data'], 65_536);
+      const alert = verifiedAlert(value, config);
+      return { status: 200, headers, jsonBody: await services.controller.trigger(alert.id, alert.firedAt) };
+    } catch (error) {
+      if (route === 'status') return { status: 503, headers, jsonBody: { schemaVersion: 1, state: 'unavailable', generation: 0 } };
+      const safe = error instanceof ApiError ? error : new ApiError(503, 'SECURITY_STATE_UNAVAILABLE');
+      return { status: safe.status, headers, jsonBody: { code: safe.code } };
+    }
+  };
+}
+export function registerRoutes(role = process.env.SERVICE_ROLE, http = app.http.bind(app)) {
+ if (role === 'security-controller') {
+  const handle = createControllerHandler();
+  http('publicServiceStatus', { route: 'service/status', methods: ['GET'], authLevel: 'anonymous', handler: request => handle(request, 'status') });
+  http('securityAlertTrigger', { route: 'security/alerts', methods: ['POST'], authLevel: 'anonymous', handler: request => handle(request, 'alerts') });
+  return;
+ }
+ if (role !== undefined && role !== 'budget-api') throw new Error('Invalid service role');
+ const handle = createHandler();
+ for (const [name, route, methods, operation] of [
   ['authParameters', 'auth/parameters', ['POST'], 'parameters'],
   ['authRegister', 'auth/register', ['POST'], 'register'],
   ['authLogin', 'auth/login', ['POST'], 'login'],
@@ -109,5 +169,8 @@ for (const [name, route, methods, operation] of [
   ['accountErase', 'account', ['DELETE'], 'erase'],
   ['budgetData', 'budget', ['GET', 'PUT'], 'budget'],
 ] as const) {
-  app.http(name, { route, methods: [...methods], authLevel: 'anonymous', handler: request => handle(request, operation) });
+  http(name, { route, methods: [...methods], authLevel: 'anonymous', handler: request => handle(request, operation) });
 }
+
+}
+registerRoutes();

@@ -5,14 +5,19 @@ umask 077
 usage() {
   cat <<'USAGE'
 Usage: infra/publish-github-build.sh --resource-group GROUP [--subscription ID] [--release api-build-COMMIT_SHA]
+       [--deployment-name NAME] [--blob-name NEW-IMMUTABLE-RELEASE.zip]
 
 Downloads the verified API build for this source checkout. No local Node build,
 browser ZIP upload, server-key generation, or Azure resource creation is needed.
+The deployment defaults to budget-backend. Use a separate deployment name for
+the security controller. Use a NEW blob name when upgrading deployed code.
 USAGE
 }
 budget_subscription=''
 budget_group=''
 budget_release=''
+budget_deployment='budget-backend'
+budget_blob_override=''
 while (($#)); do
   if [[ "$1" == '--help' || "$1" == '-h' ]]; then usage; exit 0; fi
   if (($# < 2)); then usage >&2; exit 2; fi
@@ -20,12 +25,20 @@ while (($#)); do
     --subscription) budget_subscription=$2 ;;
     --resource-group) budget_group=$2 ;;
     --release) budget_release=$2 ;;
+    --deployment-name) budget_deployment=$2 ;;
+    --blob-name) budget_blob_override=$2 ;;
     *) usage >&2; exit 2 ;;
   esac
   shift 2
 done
 if [[ -z "$budget_group" || ! "$budget_group" =~ ^[A-Za-z0-9][A-Za-z0-9._\(\)-]{0,89}$ ]]; then
   printf 'Provide the existing resource-group name.\n' >&2; exit 2
+fi
+if [[ ! "$budget_deployment" =~ ^[A-Za-z0-9][A-Za-z0-9._\(\)-]{0,63}$ ]]; then
+  printf 'Provide a valid existing deployment name.\n' >&2; exit 2
+fi
+if [[ -n "$budget_blob_override" && ! "$budget_blob_override" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.zip$ ]]; then
+  printf 'Use an immutable ZIP filename without directories.\n' >&2; exit 2
 fi
 for budget_tool in az python3 curl git; do
   command -v "$budget_tool" >/dev/null || { printf '%s is required; use Azure Cloud Shell Bash.\n' "$budget_tool" >&2; exit 2; }
@@ -48,7 +61,7 @@ if [[ ! "$budget_subscription" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-
 fi
 printf 'Reading public resource names from the existing deployment...\n'
 az deployment group show --subscription "$budget_subscription" --resource-group "$budget_group" \
-  --name budget-backend --only-show-errors --output json \
+  --name "$budget_deployment" --only-show-errors --output json \
   --query '{state:properties.provisioningState,functionApp:properties.outputs.functionAppName.value,storage:properties.outputs.hostStorageAccountName.value,blob:properties.outputs.deploymentPackageBlob.value}' \
   > "$budget_work/public-deployment.json"
 python3 - "$budget_work/public-deployment.json" > "$budget_work/public-names" <<'PY'
@@ -66,6 +79,7 @@ for field, pattern in patterns.items():
     print(item)
 PY
 mapfile -t budget_names < "$budget_work/public-names"
+if [[ -n "$budget_blob_override" ]]; then budget_names[2]=$budget_blob_override; fi
 budget_url="https://github.com/Christopher-key/Budget-App/releases/download/$budget_release"
 printf 'Downloading the API package built by GitHub Actions...\n'
 if ! curl --fail --silent --show-error --location "$budget_url/budget-api.zip.sha256" \

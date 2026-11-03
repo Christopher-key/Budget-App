@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', 'Verification/check-cloud-template.py', 'Verification/test-api-publisher.py', '.github/workflows/cloud-checks.yml']
+    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', 'Verification/*cloud*', 'Verification/*lockdown*', 'Verification/test-api-publisher.py', '.github/workflows/cloud-checks.yml']
   pull_request:
-    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', 'Verification/check-cloud-template.py', 'Verification/test-api-publisher.py', '.github/workflows/cloud-checks.yml']
+    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', 'Verification/*cloud*', 'Verification/*lockdown*', 'Verification/test-api-publisher.py', '.github/workflows/cloud-checks.yml']
 
 permissions:
   contents: read
@@ -27,10 +27,15 @@ jobs:
           az bicep install
           az bicep build --file infra/main.bicep --outfile "$RUNNER_TEMP/budget-template.json"
           python3 Verification/check-cloud-template.py "$RUNNER_TEMP/budget-template.json"
+          az bicep build --file infra/lockdown-control.bicep --outfile "$RUNNER_TEMP/budget-lockdown.json"
+          az bicep build --file infra/security-baseline.bicep --outfile "$RUNNER_TEMP/budget-baseline.json"
+          python3 Verification/check-lockdown-template.py "$RUNNER_TEMP/budget-lockdown.json" "$RUNNER_TEMP/budget-baseline.json"
       - name: Financial models and Excel
         run: npm ci --prefix shared && npm run build --prefix shared && npm test --prefix shared
       - name: Verify safe API publication and retries
-        run: python3 Verification/test-api-publisher.py
+        run: |
+          python3 Verification/test-api-publisher.py
+          python3 Verification/test-lockdown-control.py
       - name: App accounts, encrypted sync, and passcode policy
         run: npm ci --prefix api && npm test --prefix api
       - name: Package deployable API
