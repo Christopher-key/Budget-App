@@ -35,7 +35,7 @@ class FakeControl:
 
 
 class ActivationTests(unittest.TestCase):
-    def test_metadata_uses_existing_function_region_and_only_public_fields(self):
+    def metadata_fixture(self):
         subscription = '11111111-2222-3333-4444-555555555555'
         group_id = '/subscriptions/' + subscription + '/resourceGroups/synthetic-group'
         args = Namespace(subscription=subscription, resource_group='synthetic-group',
@@ -47,8 +47,14 @@ class ActivationTests(unittest.TestCase):
              'principalId': '22222222-2222-3333-4444-555555555555',
              'hostname': 'synthetic-budget.azurewebsites.net', 'state': 'Running'},
             {'hostname': 'synthetic-site.azurestaticapps.net'},
+            '44444444-2222-3333-4444-555555555555',
+            '44444444-2222-3333-4444-555555555555',
             '33333333-2222-3333-4444-555555555555',
         ]
+        return args, replies
+
+    def test_metadata_uses_existing_function_region_and_supported_cli_arguments(self):
+        args, replies = self.metadata_fixture()
         with patch.object(activation, 'az', side_effect=replies) as azure:
             result = activation.metadata(args)
         self.assertEqual(result['location'], 'eastus')
@@ -56,6 +62,65 @@ class ActivationTests(unittest.TestCase):
         calls = [call.args[0] for call in azure.call_args_list]
         self.assertTrue(all('--query' in command for command in calls))
         self.assertFalse(any('appsettings' in command or 'keys' in command for command in calls))
+        graph = next(command for command in calls if command[:3] == ['ad', 'signed-in-user', 'show'])
+        self.assertNotIn('--subscription', graph, 'Azure CLI ignores this argument for ad signed-in-user.')
+        for command in calls[:3]:
+            self.assertEqual(command[command.index('--subscription') + 1], args.subscription)
+
+    def test_different_active_tenant_blocks_directory_lookup_before_changes(self):
+        args, replies = self.metadata_fixture()
+        replies[4] = '55555555-2222-3333-4444-555555555555'
+        with patch.object(activation, 'az', side_effect=replies) as azure:
+            with self.assertRaisesRegex(activation.ActivationError, 'different tenant'):
+                activation.metadata(args)
+        self.assertEqual(azure.call_count, 5)
+        self.assertFalse(any(call.args[0][:1] == ['ad'] for call in azure.call_args_list))
+
+    def test_explicit_operator_id_avoids_directory_and_active_tenant_lookups(self):
+        args, replies = self.metadata_fixture()
+        args.operator_object_id = replies[-1]
+        with patch.object(activation, 'az', side_effect=replies[:3]) as azure:
+            result = activation.metadata(args)
+        self.assertEqual(result['operator'], args.operator_object_id)
+        self.assertEqual(azure.call_count, 3)
+
+    def test_cli_argument_failure_reports_only_fixed_operation_and_safe_category(self):
+        result = Namespace(returncode=2, stdout='', stderr='ERROR: unrecognized arguments: --subscription synthetic-sensitive-value')
+        with patch.object(activation.subprocess, 'run', return_value=result):
+            with self.assertRaises(activation.ActivationError) as raised:
+                activation.az(['ad', 'signed-in-user', 'show', '--query', 'id', '--output', 'json'])
+        message = str(raised.exception)
+        self.assertIn('signed-in administrator', message)
+        self.assertIn('CLI_ARGUMENT_ERROR', message)
+        self.assertNotIn('synthetic-sensitive-value', message)
+
+    def test_optional_lookup_does_not_hide_permission_errors_containing_not_found_text(self):
+        diagnostics = [
+            'ERROR: (AuthorizationFailed) DeploymentNotFound synthetic-sensitive-value',
+            'ERROR: {"error":{"code":"AuthorizationFailed","message":"ResourceNotFound synthetic-sensitive-value"}}',
+        ]
+        for stderr in diagnostics:
+            with self.subTest(stderr=stderr):
+                with patch.object(activation.subprocess, 'run', return_value=Namespace(returncode=1, stdout='', stderr=stderr)):
+                    with self.assertRaises(activation.ActivationError) as raised:
+                        activation.az(['deployment', 'group', 'show'], optional=True)
+                self.assertIn('AuthorizationFailed', str(raised.exception))
+                self.assertNotIn('synthetic-sensitive-value', str(raised.exception))
+
+    def test_optional_lookup_accepts_only_explicit_missing_resource_codes(self):
+        for stderr in ['ERROR: (DeploymentNotFound) synthetic-sensitive-value',
+                       'ERROR: {"error":{"code":"ResourceNotFound","message":"synthetic-sensitive-value"}}']:
+            with patch.object(activation.subprocess, 'run', return_value=Namespace(returncode=1, stdout='', stderr=stderr)):
+                self.assertIsNone(activation.az(['deployment', 'group', 'show'], optional=True))
+
+    def test_unknown_errors_and_bad_metadata_never_echo_azure_payloads(self):
+        for result in [Namespace(returncode=1, stdout='', stderr='ERROR: (synthetic-sensitive-value) private diagnostic'),
+                       Namespace(returncode=0, stdout='synthetic-sensitive-value', stderr='')]:
+            with patch.object(activation.subprocess, 'run', return_value=result):
+                with self.assertRaises(activation.ActivationError) as raised:
+                    activation.az(['functionapp', 'show', '--name', 'synthetic-sensitive-value'])
+            self.assertNotIn('synthetic-sensitive-value', str(raised.exception))
+            self.assertNotIn('private diagnostic', str(raised.exception))
 
     def test_unavailable_checked_release_cannot_provision_or_stop_azure_resources(self):
         argv = ['enable-lockdown.py', '--subscription', '11111111-2222-3333-4444-555555555555',

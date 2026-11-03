@@ -26,6 +26,52 @@ GUID = re.compile(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z')
 GROUP = re.compile(r'[A-Za-z0-9][A-Za-z0-9._()-]{0,89}\Z')
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9-]{1,58}[A-Za-z0-9]\Z')
 BLOB_ROLE = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
+SAFE_AZURE_CODES = {
+    'AuthorizationFailed', 'AuthorizationPermissionMismatch', 'AuthenticationFailed',
+    'InvalidAuthenticationToken', 'InvalidAuthenticationTokenTenant', 'ExpiredAuthenticationToken',
+    'SubscriptionNotFound', 'ResourceGroupNotFound', 'ResourceNotFound', 'DeploymentNotFound',
+    'InvalidTemplateDeployment', 'DeploymentFailed', 'InvalidTemplate', 'BadRequest',
+    'MissingSubscriptionRegistration', 'NoRegisteredProviderFound',
+    'RoleAssignmentExists', 'PrincipalNotFound', 'RoleDefinitionDoesNotExist',
+    'SubscriptionIsOverQuotaForSku', 'ServiceUnavailable', 'TooManyRequests',
+}
+
+
+def operation_label(arguments):
+    """Labels contain only fixed command names, never supplied argument values."""
+    labels = {
+        ('account', 'show'): 'read the Azure subscription context',
+        ('deployment', 'group', 'show'): 'read the deployment state',
+        ('deployment', 'group', 'create'): 'create the security deployment',
+        ('functionapp', 'show'): 'read Function App metadata',
+        ('staticwebapp', 'show'): 'read Static Web App metadata',
+        ('ad', 'signed-in-user', 'show'): 'look up the signed-in administrator',
+        ('role', 'assignment', 'list'): 'check scoped role assignments',
+        ('role', 'assignment', 'create'): 'assign a scoped operator role',
+        ('role', 'definition', 'list'): 'read a security role definition',
+        ('functionapp', 'config', 'appsettings', 'set'): 'enable the budget security gate',
+    }
+    return next((label for prefix, label in labels.items() if arguments[:len(prefix)] == list(prefix)),
+                'complete an Azure operation')
+
+
+def azure_error_code(message):
+    """Extract a known top-level code; never echo diagnostics or arbitrary text."""
+    try:
+        document = json.loads(re.sub(r'^ERROR:\s*', '', message.strip(), count=1))
+        code = document.get('code') or document.get('error', {}).get('code')
+        if isinstance(code, str) and code in SAFE_AZURE_CODES:
+            return code
+    except (ValueError, AttributeError, TypeError):
+        pass
+    match = re.match(r'^ERROR:\s*\(([A-Za-z][A-Za-z0-9]*)\)(?:\s|$)', message.strip())
+    if match and match.group(1) in SAFE_AZURE_CODES:
+        return match.group(1)
+    if re.search(r'(?m)^ERROR:\s*unrecognized arguments:', message):
+        return 'CLI_ARGUMENT_ERROR'
+    if re.search(r"(?mi)^ERROR:.*(?:run ['\"]?az login|please log in)", message):
+        return 'LOGIN_REQUIRED'
+    return 'UNCLASSIFIED'
 
 
 class ActivationError(Exception):
@@ -38,21 +84,23 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 def az(arguments, *, optional=False):
+    label = operation_label(arguments)
     try:
         result = subprocess.run(['az', *arguments, '--only-show-errors'], capture_output=True,
                                 text=True, timeout=55, check=False)
     except (OSError, subprocess.TimeoutExpired):
-        raise ActivationError('Azure did not complete the requested operation. Retry from Azure Cloud Shell; no secret diagnostics were printed.') from None
+        raise ActivationError(f'Azure could not {label} within the time limit. Retry from Azure Cloud Shell; no secret diagnostics were printed.') from None
     if result.returncode:
-        if optional and any(code in result.stderr for code in ('DeploymentNotFound', 'ResourceNotFound')):
+        code = azure_error_code(result.stderr)
+        if optional and code in {'DeploymentNotFound', 'ResourceNotFound'}:
             return None
-        raise ActivationError('Azure rejected an operation. Check the current Azure login, scoped permissions and Portal activity log; credentials and raw diagnostics were not printed.')
+        raise ActivationError(f'Azure could not {label} ({code}). Check the current login and scoped permissions; credentials and raw diagnostics were not printed.')
     if not result.stdout.strip():
         return None
     try:
         return json.loads(result.stdout)
     except ValueError:
-        raise ActivationError('Azure returned unexpected metadata.') from None
+        raise ActivationError(f'Azure returned unexpected metadata while trying to {label}.') from None
 
 
 def require(condition, message):
@@ -79,8 +127,18 @@ def metadata(args):
             'Budget Function metadata does not match the requested deployment.')
     require(isinstance(site, dict) and re.fullmatch(r'[a-zA-Z0-9.-]+\.azurestaticapps\.net', site.get('hostname', '')),
             'The Static Web App did not return a recognized public hostname.')
-    operator = args.operator_object_id or az(['ad', 'signed-in-user', 'show', '--subscription', args.subscription,
-                                            '--query', 'id', '--output', 'json'])
+    operator = args.operator_object_id
+    if operator is None:
+        # This Microsoft Graph command explicitly ignores the CLI subscription
+        # argument. Check the tenant context, then omit the unsupported flag.
+        selected_tenant = az(['account', 'show', '--subscription', args.subscription,
+                              '--query', 'tenantId', '--output', 'json'])
+        active_tenant = az(['account', 'show', '--query', 'tenantId', '--output', 'json'])
+        require(isinstance(selected_tenant, str) and GUID.fullmatch(selected_tenant)
+                and isinstance(active_tenant, str) and selected_tenant.lower() == active_tenant.lower(),
+                'The active Azure login uses a different tenant. Select the target subscription with az account set, '
+                'or supply the approved user object ID with --operator-object-id. No resources were changed.')
+        operator = az(['ad', 'signed-in-user', 'show', '--query', 'id', '--output', 'json'])
     require(isinstance(operator, str) and GUID.fullmatch(operator), 'Supply an approved human operator object ID; automatic discovery requires a user Azure login.')
     require(operator.lower() != function['principalId'].lower(), 'The budget runtime cannot be the security operator.')
     # App Service can return display names such as "East US"; Storage expects

@@ -25,6 +25,14 @@ user's object ID; if that directory lookup is unavailable, supply the approved
 human user's `--operator-object-id` explicitly. The script grants code publishing
 only on the two package containers and the existing scoped operator roles.
 
+Automatic operator lookup requires the active Azure CLI tenant to match the
+target subscription's tenant. If the script reports a mismatch, select the target
+subscription with `az account set --subscription 70620dac-9725-46a9-b2c6-f02a9c1e31df`
+and retry, or supply the approved human operator object ID. Failure messages name
+the operation and a safe error code; raw Azure diagnostics and credentials remain
+hidden. A failure before the first download/provisioning progress line occurs
+during read-only metadata checks, before resource changes.
+
 The activator verifies the GitHub ZIP/checksum before Azure changes, provisions
 the separate controller/storage on the existing plan, creates an initial locked
 control record with create-only semantics, and verifies the controller before
