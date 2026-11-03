@@ -4,6 +4,57 @@ These optional files are not deployed by repository CI. The currently working
 site stays unchanged until its owner provisions, publishes, and enables this
 feature. Test it with invented accounts before accepting real financial records.
 
+## Owner-authorized activation
+
+The owner has authorized activating the prepared gate while deferring Duo and
+the independent recovery portal. Run the following from a current checkout in
+**Azure Cloud Shell Bash**. It uses the existing Azure login and requires no
+financial records, server-key file, GitHub token or manually uploaded ZIP:
+
+```sh
+python3 infra/enable-lockdown.py \
+  --subscription 70620dac-9725-46a9-b2c6-f02a9c1e31df \
+  --resource-group Simpleudget_group --static-web-app SimpleBudget \
+  --release api-build-b154e18663e138fef4831e73be363ee2ddfb19d5 \
+  --apply
+```
+
+Omit `--apply` for a public-metadata-only plan. The owner must have resource and
+role-assignment permissions. Automatic operator discovery reads the signed-in
+user's object ID; if that directory lookup is unavailable, supply the approved
+human user's `--operator-object-id` explicitly. The script grants code publishing
+only on the two package containers and the existing scoped operator roles.
+
+The activator verifies the GitHub ZIP/checksum before Azure changes, provisions
+the separate controller/storage on the existing plan, creates an initial locked
+control record with create-only semantics, and verifies the controller before
+stopping the budget API. It then enables the gate while the API is stopped,
+publishes the new code, and checks the locked response. **Only an unchanged first
+initialization** can be commissioned open. This records initialization rather
+than labeling maintenance a false security alert. Existing incidents, confirmed
+initializations and previously commissioned records are never automatically
+reopened. A failure after stopping the API requests another stop; inspect control
+state before resuming. Do not disable the gate as a startup workaround.
+
+Commissioning briefly interrupts API access and invalidates earlier sessions.
+It does not read or change financial records or regenerate account keys. New
+execution/storage charges may apply; no Duo subscription or paid alert service
+is purchased. Automatic alert forwarding remains unconfigured.
+
+On success the script prints a public `securityStatusUrl`. Set the GitHub Actions
+repository variable `VITE_SECURITY_STATUS_URL` to that exact URL and rebuild the
+Static Web App, or share only that public URL with Codex so the verified website
+configuration can be completed. Azure Static Web App runtime settings do not
+replace this GitHub/Vite build configuration. Do not enable a guessed URL.
+
+**Future infrastructure updates:** the existing `main.bicep` owns the entire API
+app-settings array. Redeploying old backend parameters can remove the gate flags
+and restore an older package. Preserve the enabled control URL, enforcement flag
+and new package filename in the infrastructure configuration before any later
+`budget-backend` redeployment. The activator does not read or rewrite the private
+account-key parameter file. The emergency Azure operator tool remains available
+while independent MFA recovery is deferred.
+
 The normal administrator experience still needs the independently hosted
 8–12 digit passcode and phone MFA requested by the owner. **The Azure CLI below
 is an emergency Azure-operator path; it does not enforce that independent MFA.**

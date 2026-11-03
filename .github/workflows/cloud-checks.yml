@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', 'Verification/*cloud*', 'Verification/*lockdown*', 'Verification/test-api-publisher.py', '.github/workflows/cloud-checks.yml']
+    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', 'Verification/*cloud*', 'Verification/*lockdown*', 'Verification/test-api-publisher.py', 'Verification/test-deployment-guard.py', '.github/workflows/cloud-checks.yml']
   pull_request:
-    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', 'Verification/*cloud*', 'Verification/*lockdown*', 'Verification/test-api-publisher.py', '.github/workflows/cloud-checks.yml']
+    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', 'Verification/*cloud*', 'Verification/*lockdown*', 'Verification/test-api-publisher.py', 'Verification/test-deployment-guard.py', '.github/workflows/cloud-checks.yml']
 
 permissions:
   contents: read
@@ -36,6 +36,8 @@ jobs:
         run: |
           python3 Verification/test-api-publisher.py
           python3 Verification/test-lockdown-control.py
+          python3 Verification/test-lockdown-activation.py
+          python3 Verification/test-deployment-guard.py
       - name: App accounts, encrypted sync, and passcode policy
         run: npm ci --prefix api && npm test --prefix api
       - name: Package deployable API

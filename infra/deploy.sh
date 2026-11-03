@@ -75,11 +75,38 @@ PY
 # Azure's full what-if payload can include app settings. Keep it in a private
 # temporary file and print only identifiers/change types, never property values.
 result=$(mktemp)
-trap 'rm -f -- "$result"' EXIT
+guard_error=$(mktemp)
+trap 'rm -f -- "$result" "$guard_error"' EXIT
 common=(--subscription "$subscription" --resource-group "$resource_group" --mode Incremental
   --name budget-backend --template-file "$script_dir/main.bicep" --parameters "@$parameters"
   --only-show-errors --output json)
 if "$deploy"; then
+  # main.bicep owns literal appSettings and cannot preserve an activated gate.
+  # Existence of ANY controller deployment makes baseline apply unsafe, even
+  # while provisioning or after failure. Read only its state, never settings.
+  if az deployment group show --subscription "$subscription" --resource-group "$resource_group" \
+      --name budget-lockdown --query properties.provisioningState --output tsv \
+      --only-show-errors > "$result" 2> "$guard_error"; then
+    printf '%s\n' 'Baseline deployment blocked: a budget-lockdown deployment exists. main.bicep does not preserve the incident security gate. Review a staged migration that preserves the gate before changing infrastructure; read-only what-if remains available.' >&2
+    exit 1
+  elif ! python3 - "$guard_error" <<'PY'
+import json, pathlib, re, sys
+message = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8', errors='replace').strip()
+allowed = {'DeploymentNotFound', 'ResourceNotFound'}
+match = re.match(r'^ERROR:\s*\((DeploymentNotFound|ResourceNotFound)\)(?:\s|$)', message)
+if match:
+    raise SystemExit(0)
+try:
+    value = json.loads(re.sub(r'^ERROR:\s*', '', message, count=1))
+    code = value.get('code') or value.get('error', {}).get('code')
+except (ValueError, AttributeError, TypeError):
+    code = None
+raise SystemExit(0 if isinstance(code, str) and code in allowed else 1)
+PY
+  then
+    printf '%s\n' 'Baseline deployment blocked: Azure could not verify whether budget-lockdown exists. Check scoped read permissions and connectivity before retrying. No infrastructure changes were applied.' >&2
+    exit 1
+  fi
   az deployment group create "${common[@]}" > "$result"
   python3 - "$result" <<'PY'
 import json, sys

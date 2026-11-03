@@ -253,3 +253,16 @@ and are not deployed by CI. Additional execution/storage or identity-provider
 charges require review before owner-side provisioning. The emergency Azure CLI
 path does not enforce the separately hosted administrator passcode/phone MFA
 requested for normal recovery; that authentication boundary needs its own setup.
+
+For owner-authorized activation using an existing Azure Cloud Shell login, see
+[the activation command](LOCKDOWN-OPERATIONS.md#owner-authorized-activation).
+`enable-lockdown.py` prepares the independent controller, installs the checked
+API build, verifies denial while commissioning, and opens only a freshly
+initialized control record. It prints the verified public status URL needed by
+the website build. Creating its Azure resources may incur usage charges; Duo
+and automatic alert services are not enabled by this command.
+
+See [administrator access evaluation](ADMIN-ACCESS.md) for free Entra Security
+Defaults, its limits, and the proposed separation of developers, managers and
+security operators. These identity policies and portal roles are not configured
+by the lockdown activator.
