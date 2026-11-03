@@ -113,8 +113,14 @@ resource container 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/container
       partitionKey: { paths: ['/ownerId'], kind: 'Hash', version: 2 }
       // Only rate-limit documents carry a positive per-item TTL. Accounts do not expire.
       defaultTtl: -1
-      // The repository uses point reads and same-partition batches only.
-      indexingPolicy: { indexingMode: 'none', automatic: false }
+      // Cosmos requires consistent indexing when TTL is enabled. Index only
+      // the system timestamp used by expiry, keeping credentials/ciphertext out.
+      indexingPolicy: {
+        indexingMode: 'consistent'
+        automatic: true
+        includedPaths: [{ path: '/_ts/?' }]
+        excludedPaths: [{ path: '/*' }]
+      }
     }
     options: {}
   }

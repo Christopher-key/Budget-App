@@ -13,7 +13,7 @@ paid resources or publishes the backend automatically.
 | Function App | Linux Consumption Y1, Functions v4, Node.js 22, HTTPS/TLS 1.2, system-assigned managed identity; SCM/FTP password publishing disabled |
 | Host/package storage | Standard LRS StorageV2; private package container; HTTPS/TLS 1.2; shared keys and public blobs disabled |
 | Cosmos DB | NoSQL serverless, one region, Session consistency, local/key auth disabled |
-| Container | `budget` / `accounts` by default; partition `/ownerId`; point reads/atomic same-partition batches, no query indexes; TTL enabled only for items supplying an expiry |
+| Container | `budget` / `accounts` by default; partition `/ownerId`; point reads/atomic same-partition batches; consistent indexing of system timestamp `/_ts/?` only, with document paths excluded; TTL enabled only for items supplying an expiry |
 | Backups | Four-hour periodic backups, eight-hour retention, local redundancy |
 | Function → Cosmos | Custom read-metadata and item read/create/replace/delete role on this container only; no queries, upsert, change feed, stored procedures, or management access |
 | Function → host storage | Blob Data Owner on this host account only, needed for host containers/leases and private package reads; not subscription Owner |
@@ -103,6 +103,18 @@ Record the non-secret outputs `functionAppName`, `apiBaseUrl`,
 renaming resources does not migrate records or delete abandoned resources. There
 is no automatic migration from the former Entra/plaintext API schema; use a fresh
 dedicated backend container for this release rather than pointing it at old data.
+
+If deployment fails partway through, some resources may already exist. Correct
+the template and retry the incremental deployment with the same parameter file,
+region, names, and server keys. Restore the saved private settings if temporary
+Cloud Shell files expire; do not generate replacement keys for a partially
+deployed backend. The failed Cosmos container can be retried without deleting
+the resource group or the existing website.
+
+Cosmos requires consistent indexing when container TTL is present, including
+`defaultTtl: -1`. The timestamp-only index supports expiring rate-limit records
+while document paths remain excluded. Documents without a positive item TTL,
+including account records and encrypted budgets, do not expire automatically.
 
 ## 4. Build and publish API code
 

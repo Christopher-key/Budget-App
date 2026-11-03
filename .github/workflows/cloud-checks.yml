@@ -3,9 +3,9 @@ name: Cloud application checks
 on:
   push:
     branches: [main]
-    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', '.github/workflows/cloud-checks.yml']
+    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', 'Verification/check-cloud-template.py', '.github/workflows/cloud-checks.yml']
   pull_request:
-    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', '.github/workflows/cloud-checks.yml']
+    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', 'Verification/check-cloud-template.py', '.github/workflows/cloud-checks.yml']
 
 permissions:
   contents: read
@@ -21,6 +21,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - name: Verify Azure expiry and indexing compatibility
+        run: |
+          az bicep install
+          az bicep build --file infra/main.bicep --outfile "$RUNNER_TEMP/budget-template.json"
+          python3 Verification/check-cloud-template.py "$RUNNER_TEMP/budget-template.json"
       - name: Financial models and Excel
         run: npm ci --prefix shared && npm run build --prefix shared && npm test --prefix shared
       - name: App accounts, encrypted sync, and passcode policy
