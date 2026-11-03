@@ -1,102 +1,69 @@
 import assert from 'node:assert/strict';
-import { webcrypto } from 'node:crypto';
 import test from 'node:test';
-import { authorizationURL, completeSignIn, consumePKCE, validatePublicConfig, type PublicConfig, type TransientStorage } from '../src/auth.js';
+import { authenticate, AuthError, validatePublicConfig, type PublicConfig } from '../src/auth.js';
+import { createDataKey, encode, passwordKeys, randomSalt } from '../src/crypto.js';
 
-const config: PublicConfig = {
-  configured: true, clientId: '11111111-1111-4111-8111-111111111111',
-  authority: 'https://login.microsoftonline.com/22222222-2222-4222-8222-222222222222',
-  scope: 'api://33333333-3333-4333-8333-333333333333/Budget.Access', apiBaseUrl: 'https://budget-api.example.test',
-};
-const redirect = 'https://budget.example.test/';
-function transient(): TransientStorage & { data: Map<string, string> } {
-  const data = new Map<string, string>();
-  return { data, getItem: key => data.get(key) ?? null, setItem: (key, value) => { data.set(key, value); }, removeItem: key => { data.delete(key); } };
-}
-const cryptoAPI = webcrypto as unknown as Crypto;
-async function begin(storage = transient()) {
-  const url = new URL(await authorizationURL(config, redirect, storage, cryptoAPI));
-  return { storage, url, state: url.searchParams.get('state')! };
-}
+const config: PublicConfig = { configured: true, apiBaseUrl: 'https://budget-api.example.test' };
+const accountId = encode(new Uint8Array(32).fill(1));
+const secret = encode(new Uint8Array(32).fill(2));
+const password = 'a long synthetic password';
+const token = accountId + '.' + secret;
+const expiresAt = () => new Date(Date.now() + 1_800_000).toISOString();
 
-test('configuration allows only an Azure authority and the custom Budget.Access scope', () => {
-  assert.ok(validatePublicConfig(config));
-  for (const value of [
-    { ...config, configured: false }, { ...config, scope: 'openid profile offline_access' },
-    { ...config, scope: `${config.scope} https://graph.microsoft.com/User.Read` },
-    { ...config, scope: 'api://33333333-3333-4333-8333-333333333333/Other.Access' },
-    { ...config, authority: 'https://login.microsoftonline.com.attacker.test/tenant' },
-    { ...config, authority: 'https://user:password@login.microsoftonline.com/tenant' },
-    { ...config, authority: 'http://login.microsoftonline.com/tenant' },
-    { ...config, apiBaseUrl: 'http://budget-api.example.test' },
-    { ...config, apiBaseUrl: 'https://budget-api.example.test/api' },
-  ]) assert.equal(validatePublicConfig(value), null);
-});
-
-test('authorization uses a fresh S256 challenge and custom scope without refresh or ID token scopes', async () => {
-  const first = await begin(), second = await begin();
-  assert.equal(first.url.searchParams.get('scope'), config.scope);
-  assert.equal(first.url.searchParams.get('response_type'), 'code');
-  assert.equal(first.url.searchParams.get('code_challenge_method'), 'S256');
-  assert.notEqual(first.state, second.state);
-  assert.notEqual(first.url.searchParams.get('code_challenge'), second.url.searchParams.get('code_challenge'));
-  const verifier = consumePKCE(first.storage, first.state, redirect);
-  const challenge = Buffer.from(await webcrypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))).toString('base64url');
-  assert.equal(challenge, first.url.searchParams.get('code_challenge'));
-  assert.equal(first.storage.data.size, 0);
-  assert.throws(() => consumePKCE(first.storage, first.state, redirect), /expired/);
-});
-
-test('state mismatch, redirect mismatch, stale state, and malformed verifier fail closed and consume state', async () => {
-  for (const change of [
-    (entry: any) => { entry.state = 'wrong-state'; },
-    (entry: any) => { entry.redirectUri = 'https://attacker.example.test/'; },
-    (entry: any) => { entry.createdAt = Date.now() - 600_001; },
-    (entry: any) => { entry.createdAt = Date.now() + 60_000; },
-    (entry: any) => { entry.verifier = {}; },
-  ]) {
-    const { storage, state } = await begin();
-    const [key, raw] = [...storage.data.entries()][0];
-    const entry = JSON.parse(raw); change(entry); storage.setItem(key, JSON.stringify(entry));
-    assert.throws(() => consumePKCE(storage, state, redirect), /could not be verified/);
-    assert.equal(storage.data.size, 0);
-  }
-});
-
-test('token exchange uses the consumed verifier; only access token and expiry survive', async () => {
-  const { storage, state } = await begin();
-  let calls = 0;
+function server() {
+  const calls: { path: string; body: any; init?: RequestInit }[] = [];
+  let salt = randomSalt(), wrappedKey: unknown, proof = '';
   const fetcher = (async (url, init) => {
-    calls++;
-    assert.equal(url, config.authority + '/oauth2/v2.0/token');
-    assert.equal(init?.credentials, 'omit');
-    assert.equal(init?.cache, 'no-store');
-    assert.equal(init?.redirect, 'error');
-    const body = new URLSearchParams(init?.body as URLSearchParams);
-    assert.equal(body.get('scope'), config.scope);
-    assert.equal(body.get('grant_type'), 'authorization_code');
-    assert.match(body.get('code_verifier')!, /^[A-Za-z0-9_-]{43,128}$/);
-    return Response.json({ access_token: 'synthetic-access-token', expires_in: 3600, id_token: 'discarded', refresh_token: 'discarded' });
+    const path = new URL(String(url)).pathname.split('/').pop()!, body = JSON.parse(String(init?.body)); calls.push({ path, body, init });
+    assert.equal(init?.credentials, 'omit'); assert.equal(init?.cache, 'no-store'); assert.equal(init?.redirect, 'error');
+    assert.equal(new Headers(init?.headers).get('Authorization'), null);
+    if (path === 'parameters') return Response.json({ accountId, salt, iterations: 600_000 });
+    if (path === 'register') { salt = body.salt; wrappedKey = body.wrappedKey; proof = body.proof; }
+    if (path === 'login' && body.proof !== proof) return Response.json({ code: 'AUTH_REQUIRED' }, { status: 401 });
+    return Response.json({ accountId, salt, wrappedKey, token, expiresAt: expiresAt() });
   }) as typeof fetch;
-  const auth = await completeSignIn(config, `?code=synthetic-code&state=${state}`, redirect, storage, fetcher);
-  assert.equal(calls, 1);
-  assert.deepEqual(Object.keys(auth!).sort(), ['accessToken', 'expiresAt']);
-  assert.equal(auth?.accessToken, 'synthetic-access-token');
-  assert.ok(auth!.expiresAt > Date.now());
-  assert.equal(storage.data.size, 0);
+  return { calls, fetcher };
+}
+
+test('public configuration only needs an HTTPS API origin, never Microsoft identity or client secrets', () => {
+  assert.deepEqual(validatePublicConfig(config), config);
+  assert.deepEqual(validatePublicConfig({ ...config, apiBaseUrl: 'http://localhost:7071' }), { configured: true, apiBaseUrl: 'http://localhost:7071' });
+  for (const value of [null, {}, { ...config, configured: false }, { ...config, apiBaseUrl: 'http://api.example.test' }, { ...config, apiBaseUrl: 'https://user:password@api.example.test/' }, { ...config, apiBaseUrl: 'https://api.example.test/api' }, { ...config, apiBaseUrl: 'https://api.example.test/?secret=x' }, { ...config, apiBaseUrl: 'https://api.example.test/#secret' }]) assert.equal(validatePublicConfig(value), null);
 });
 
-test('unverified and ambiguous callbacks never reach the token endpoint', async () => {
-  for (const query of ['?code=x&state=wrong', '?code=x&code=y&state=x', '?error=access_denied']) {
-    const { storage } = await begin(); let calls = 0;
-    await assert.rejects(completeSignIn(config, query, redirect, storage, (async () => { calls++; throw new Error('unexpected'); }) as typeof fetch));
-    assert.equal(calls, 0); assert.equal(storage.data.size, 0);
+test('account creation and another-device login unlock the same data key without transmitting a password or persisting credentials', async () => {
+  const remote = server();
+  const created = await authenticate(config, ' Test.User ', password, true, remote.fetcher);
+  const loggedIn = await authenticate(config, 'test.user', password, false, remote.fetcher);
+  assert.equal(created.accountId, accountId); assert.equal(loggedIn.accountId, accountId);
+  assert.equal(created.dataKey.extractable, false); assert.equal(loggedIn.dataKey.extractable, false);
+  assert.equal(created.accessToken, token);
+  assert.deepEqual(remote.calls.map(c => c.path), ['parameters', 'register', 'parameters', 'login']);
+  for (const { body } of remote.calls) { assert.equal(body.username, 'test.user'); assert.ok(!JSON.stringify(body).includes(password)); assert.ok(!('password' in body)); }
+  assert.match(remote.calls[1].body.proof, /^[A-Za-z0-9_-]{43}$/);
+  assert.deepEqual(Object.keys(created).sort(), ['accessToken', 'accountId', 'dataKey', 'expiresAt']);
+  await assert.rejects(authenticate(config, 'test.user', password + 'wrong', false, remote.fetcher), (error: AuthError) => error.code === 'AUTH_REQUIRED');
+});
+
+test('invalid usernames and short passwords are rejected before sending any request', async () => {
+  let calls = 0; const fetcher = (async () => { calls++; throw new Error('unexpected'); }) as typeof fetch;
+  for (const [username, pw] of [['ab', password], ['bad name', password], ['test-user', '1234'], ['test-user', 'x'.repeat(129)]]) await assert.rejects(authenticate(config, username, pw, false, fetcher));
+  assert.equal(calls, 0);
+});
+
+test('KDF downgrade, untrusted account metadata, and rate limits cannot create an authenticated session', async () => {
+  for (const parameters of [{ accountId, salt: randomSalt(), iterations: 1 }, { accountId: 'wrong', salt: randomSalt(), iterations: 600_000 }, { accountId, salt: 'short', iterations: 600_000 }]) {
+    let calls = 0;
+    await assert.rejects(authenticate(config, 'test-user', password, false, (async () => { calls++; return Response.json(parameters); }) as typeof fetch));
+    assert.equal(calls, 1);
   }
+  await assert.rejects(authenticate(config, 'test-user', password, false, (async () => Response.json({ code: 'RATE_LIMITED', debug: 'sensitive error' }, { status: 429 })) as typeof fetch), (error: AuthError) => error.code === 'RATE_LIMITED' && !error.message.includes('sensitive'));
 });
 
-test('empty or already-expired access token responses are rejected', async () => {
-  for (const response of [{ access_token: '', expires_in: 3600 }, { access_token: 'synthetic', expires_in: 10 }, null]) {
-    const { storage, state } = await begin();
-    await assert.rejects(completeSignIn(config, `?code=x&state=${state}`, redirect, storage, (async () => Response.json(response)) as typeof fetch), /invalid/);
+test('token replies must match the requested account, salt, expiry, and encrypted key schema', async () => {
+  const salt = randomSalt(), keys = await passwordKeys(password, salt), { wrappedKey } = await createDataKey(keys.wrappingKey, accountId);
+  const base = { accountId, salt, token, expiresAt: expiresAt(), wrappedKey };
+  for (const response of [{ ...base, salt: randomSalt() }, { ...base, accountId: encode(new Uint8Array(32).fill(8)) }, { ...base, token: 'unbound-token' }, { ...base, expiresAt: new Date(Date.now() - 1).toISOString() }, { ...base, expiresAt: new Date(Date.now() + 7_200_000).toISOString() }, { ...base, wrappedKey: { ...wrappedKey, data: encode(new Uint8Array(16)) } }]) {
+    await assert.rejects(authenticate(config, 'test-user', password, false, (async (url) => Response.json(String(url).endsWith('parameters') ? { accountId, salt, iterations: 600_000 } : response)) as typeof fetch));
   }
 });

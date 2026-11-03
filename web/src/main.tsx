@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { AccountStatus, BudgetPlan, Ledger, MonthlyBudget, PayFrequency, ReportedExpense, SavingsBucket } from '../../shared/contracts.js';
+import type { BudgetPlan, Ledger, MonthlyBudget, PayFrequency, ReportedExpense, SavingsBucket } from '../../shared/contracts.js';
 import { applySchedule, bucketBalances, categoryWarnings, emptyPlan, expenseCategories, formatMoney, monthId, monthSummary, moneyText, newMonth, parseMoney, summary, transactionsIn, validateLedger, windows } from '../../shared/model.js';
 import { exportWorkbook } from '../../shared/xlsx.js';
-import { authorizationURL, completeSignIn, validatePublicConfig, type PublicConfig, type AuthSession } from './auth.js';
+import { authenticate, validatePublicConfig, type PublicConfig } from './auth.js';
 import { BudgetApi, BudgetSession } from './api.js';
 import './style.css';
 
@@ -45,8 +45,8 @@ function Summary({ title, data }: { title: string; data: ReturnType<typeof summa
 function SecurityPanel({ session, onSignOut }: { session: BudgetSession; onSignOut: () => void }) {
   const state = useSyncExternalStore(session.subscribe, session.snapshot);
   const [pin, setPin] = useState(''), [confirm, setConfirm] = useState(''), [busy, setBusy] = useState(false);
-  const creating = state.phase === 'new' || state.phase === 'erased';
-  return <main className="entry-shell"><div className="entry-card"><div className="brand-mark">B</div><p className="eyebrow">Your private budget</p><h1>{state.phase === 'erased' ? 'Your budget was erased' : creating ? 'Make room for your goals' : 'Welcome back'}</h1><p className="muted">{state.phase === 'erased' ? 'Saved budget data is no longer available. Starting again creates an empty budget.' : creating ? 'Set an app passcode to protect your budget on every connected device.' : 'Enter your app passcode to open your budget.'}</p>{state.message && <p role="status" className="error">{state.message}</p>}{state.phase === 'checking' ? <p>Checking your account…</p> : state.phase === 'signedOut' ? <button className="primary" onClick={onSignOut}>Sign in again</button> : <form onSubmit={async e => { e.preventDefault(); setBusy(true); await session.open(pin, creating); setPin(''); setConfirm(''); setBusy(false); }}><Pin value={pin} onChange={setPin}/>{creating && <><Pin label="Confirm app passcode" value={confirm} onChange={setConfirm}/><p className="privacy-note">Three consecutive incorrect app passcodes erase this account’s budget data across connected devices. Microsoft sign-in is separate. Copies already exported and provider backups follow their retention policies.</p></>}<button className="primary full" disabled={busy || pin.length !== 4 || (creating && pin !== confirm)}>{busy ? 'Please wait…' : creating ? 'Start an empty budget' : 'Unlock budget'}</button></form>}<button className="text-button" onClick={onSignOut}>Sign out</button></div></main>;
+  const creating = state.phase === 'new';
+  return <main className="entry-shell"><div className="entry-card"><div className="brand-mark">B</div><p className="eyebrow">Your private budget</p><h1>{state.phase === 'erased' ? 'Your budget was erased' : creating ? 'Make room for your goals' : 'Welcome back'}</h1><p className="muted">{state.phase === 'erased' ? 'Your account and its saved budget have been erased. Sign out to create a new account.' : creating ? 'Set an app passcode to protect your budget on every connected device.' : 'Enter your app passcode to open your budget.'}</p>{state.message && <p role="status" className="error">{state.message}</p>}{state.phase === 'checking' ? <p>Checking your account…</p> : (state.phase === 'signedOut' || state.phase === 'erased') ? <button className="primary" onClick={onSignOut}>Sign in again</button> : <form onSubmit={async e => { e.preventDefault(); setBusy(true); await session.open(pin, creating); setPin(''); setConfirm(''); setBusy(false); }}><Pin value={pin} onChange={setPin}/>{creating && <><Pin label="Confirm app passcode" value={confirm} onChange={setConfirm}/><p className="privacy-note">Three consecutive incorrect app passcodes erase this account and its budget across connected devices, without another warning. Offline devices clear their copy when they reconnect. Exported files and provider backups follow their own retention policies.</p></>}<button className="primary full" disabled={busy || pin.length !== 4 || (creating && pin !== confirm)}>{busy ? 'Please wait…' : creating ? 'Start an empty budget' : 'Unlock budget'}</button></form>}<button className="text-button" onClick={onSignOut}>Sign out</button></div></main>;
 }
 function Overview({ ledger }: { ledger: Ledger }) {
   const month = currentMonth(ledger), day = new Date().getDate(), window = windows(month).find(w => day >= w.startDay && day <= w.endDay) ?? windows(month)[0];
@@ -145,7 +145,7 @@ function ExportPanel({ session, ledger }: { session: BudgetSession; ledger: Ledg
 
 function Settings({ session, ledger, signOut }: { session: BudgetSession; ledger: Ledger; signOut: () => void }) {
   const [pin, setPin] = useState(''), [next, setNext] = useState(''), [confirmPin, setConfirmPin] = useState(''), [busy, setBusy] = useState(false), [message, setMessage] = useState(''), [erase, setErase] = useState(false), [phrase, setPhrase] = useState('');
-  return <><PageHeading title="A little housekeeping" subtitle="Your schedule, security, and data. All in one place."/><div className="setting-grid"><Schedule ledger={ledger} update={l => session.edit(l)}/><section className="card settings-card"><h2>App passcode</h2><p className="muted small">Microsoft signs you in. Your four-digit app passcode unlocks your financial records.</p><form onSubmit={async event => { event.preventDefault(); setBusy(true); setMessage(''); const changed = await session.setPin(pin, next); setPin(''); setNext(''); setConfirmPin(''); setBusy(false); if (changed) setMessage('Your app passcode has been changed on all devices.'); }}><Pin label="Current app passcode" value={pin} onChange={setPin}/><div className="inline-fields"><Pin label="New app passcode" value={next} onChange={setNext}/><Pin label="Confirm new passcode" value={confirmPin} onChange={setConfirmPin}/></div><p className="privacy-note">Three consecutive incorrect passcodes erase this account’s budget data across devices. There is no passcode recovery.</p><button className="primary" disabled={busy || pin.length !== 4 || next.length !== 4 || next !== confirmPin}>{busy ? 'Updating…' : 'Change passcode'}</button>{message && <p className="success small" role="status">{message}</p>}</form></section><ExportPanel session={session} ledger={ledger}/><section className="card settings-card"><h2>Private by design</h2><ul className="privacy-list"><li>Your access token and open budget stay in this page’s memory.</li><li>Hiding the page clears financial records and revokes its unlock grant. Unlock again when you return.</li><li>Your account is checked every 15 seconds while visible. Erased or changed records clear the open budget.</li><li>Records sync only with your configured Azure API. No bank account is connected.</li></ul><div className="form-actions"><button onClick={() => session.lock()}>Lock budget</button><button onClick={signOut}>Sign out</button></div><hr/><h3 className="negative">Erase account budget data</h3><p className="muted small">Erase your budget, goals, passcode, and export request history across connected devices. Exported files and provider backups follow their own retention policies.</p><button className="danger-button" onClick={() => { setPhrase(''); setErase(true); }}>Erase budget data…</button></section></div>{erase && <Modal title="Erase your budget data?" onClose={() => setErase(false)}><p>This permanently erases the current account’s budget data. A new budget starts empty. Connected devices discard their old records when they next reach the server.</p><label className="field">Type ERASE to confirm<input autoComplete="off" value={phrase} onChange={e => setPhrase(e.target.value)}/></label><button className="danger-button full" disabled={phrase !== 'ERASE' || busy} onClick={async () => { setBusy(true); await session.erase(); setBusy(false); setErase(false); }}>Erase account budget data</button></Modal>}</>;
+  return <><PageHeading title="A little housekeeping" subtitle="Your schedule, security, and data. All in one place."/><div className="setting-grid"><Schedule ledger={ledger} update={l => session.edit(l)}/><section className="card settings-card"><h2>App passcode</h2><p className="muted small">Your account password connects your devices. Your four-digit app passcode unlocks your financial records.</p><form onSubmit={async event => { event.preventDefault(); setBusy(true); setMessage(''); const changed = await session.setPin(pin, next); setPin(''); setNext(''); setConfirmPin(''); setBusy(false); if (changed) setMessage('Your app passcode has been changed on all devices.'); }}><Pin label="Current app passcode" value={pin} onChange={setPin}/><div className="inline-fields"><Pin label="New app passcode" value={next} onChange={setNext}/><Pin label="Confirm new passcode" value={confirmPin} onChange={setConfirmPin}/></div><p className="privacy-note">Three consecutive incorrect app passcodes erase this account and its budget across connected devices. Wrong account passwords are rate-limited instead.</p><button className="primary" disabled={busy || pin.length !== 4 || next.length !== 4 || next !== confirmPin}>{busy ? 'Updating…' : 'Change passcode'}</button>{message && <p className="success small" role="status">{message}</p>}</form></section><ExportPanel session={session} ledger={ledger}/><section className="card settings-card"><h2>Private by design</h2><ul className="privacy-list"><li>Your account token, encryption key, and open budget stay in this page’s memory. Signing out removes them from the app.</li><li>Hiding the page clears the open budget and its unlock grant. Your encryption key stays in memory until you sign out or close the page.</li><li>Your account is checked every 15 seconds while visible. Erased or changed records clear the open budget.</li><li>Budgets are encrypted on this device before syncing. Your password and decryption key are never uploaded. No bank or AI service is connected.</li></ul><div className="form-actions"><button onClick={() => session.lock()}>Lock budget</button><button onClick={signOut}>Sign out</button></div><hr/><h3 className="negative">Erase account budget data</h3><p className="muted small">Erase your account login, encrypted budget, goals, passcode, and export request history across connected devices. Exported files and provider backups follow their own retention policies.</p><button className="danger-button" onClick={() => { setPhrase(''); setErase(true); }}>Erase budget data…</button></section></div>{erase && <Modal title="Erase your budget data?" onClose={() => setErase(false)}><p>This permanently erases your account login and encrypted budget. You will need to create an account again to start an empty budget. Connected devices discard their old records when they next reach the server.</p><label className="field">Type ERASE to confirm<input autoComplete="off" value={phrase} onChange={e => setPhrase(e.target.value)}/></label><button className="danger-button full" disabled={phrase !== 'ERASE' || busy} onClick={async () => { setBusy(true); await session.erase(); setBusy(false); setErase(false); }}>Erase account budget data</button></Modal>}</>;
 }
 
 function BudgetApp({ session, signOut }: { session: BudgetSession; signOut: () => void }) {
@@ -161,41 +161,96 @@ function BudgetApp({ session, signOut }: { session: BudgetSession; signOut: () =
   useEffect(() => { window.scrollTo({ top: 0, behavior: 'instant' }); }, [page]);
   if (state.phase !== 'ready' || !state.ledger) return <SecurityPanel session={session} onSignOut={signOut}/>;
   const ledger = state.ledger;
-  return <div className="app-shell"><aside className="sidebar"><a className="brand" href="#home" onClick={e => { e.preventDefault(); setPage('home'); }}><span className="brand-mark">B</span><span>Budget<small>A little more possible.</small></span></a><nav className="navigation" aria-label="Main navigation">{pageNames.map(([id, name, icon]) => <button key={id} className={page === id ? 'active' : ''} aria-current={page === id ? 'page' : undefined} onClick={() => setPage(id)}><span className="nav-icon" aria-hidden="true">{icon}</span><span>{name}</span></button>)}</nav><div className="sidebar-bottom"><div className="sidebar-note"><span aria-hidden="true">◇</span><strong>A space for your money.</strong><p>Plan thoughtfully.<br/>Make room for what matters.</p></div><button onClick={() => session.lock()}><span aria-hidden="true">♧</span> Lock your budget</button></div></aside><div className="content"><header className="topbar"><span className="muted">Your personal money space</span><div><span className="sync-status" role="status"><i/>{state.saving ? 'Saving securely…' : 'Synced with Azure'}</span><button className="avatar" aria-label="Open account settings" onClick={() => setPage('settings')}>B</button></div></header><main id="main" className="page-content">{state.message && <p className="status-alert" role="alert">{state.message}</p>}{page === 'home' && <Overview ledger={ledger}/>} {page === 'budget' && <Budget ledger={ledger} update={l => session.edit(l)}/>} {page === 'transactions' && <Transactions ledger={ledger} update={l => session.edit(l)}/>} {page === 'trends' && <Trends ledger={ledger}/>} {page === 'goals' && <Goals ledger={ledger} update={l => session.edit(l)}/>} {page === 'settings' && <Settings session={session} ledger={ledger} signOut={signOut}/>}<p className="footer-note">A clear plan. A little peace of mind.</p></main></div></div>;
+  return <div className="app-shell"><aside className="sidebar"><a className="brand" href="#home" onClick={e => { e.preventDefault(); setPage('home'); }}><span className="brand-mark">B</span><span>Budget<small>A little more possible.</small></span></a><nav className="navigation" aria-label="Main navigation">{pageNames.map(([id, name, icon]) => <button key={id} className={page === id ? 'active' : ''} aria-current={page === id ? 'page' : undefined} onClick={() => setPage(id)}><span className="nav-icon" aria-hidden="true">{icon}</span><span>{name}</span></button>)}</nav><div className="sidebar-bottom"><div className="sidebar-note"><span aria-hidden="true">◇</span><strong>A space for your money.</strong><p>Plan thoughtfully.<br/>Make room for what matters.</p></div><button onClick={() => session.lock()}><span aria-hidden="true">♧</span> Lock your budget</button></div></aside><div className="content"><header className="topbar"><span className="muted">Your personal money space</span><div><span className="sync-status" role="status"><i/>{state.saving ? 'Saving securely…' : 'Encrypted sync'}</span><button className="avatar" aria-label="Open account settings" onClick={() => setPage('settings')}>B</button></div></header><main id="main" className="page-content">{state.message && <p className="status-alert" role="alert">{state.message}</p>}{page === 'home' && <Overview ledger={ledger}/>} {page === 'budget' && <Budget ledger={ledger} update={l => session.edit(l)}/>} {page === 'transactions' && <Transactions ledger={ledger} update={l => session.edit(l)}/>} {page === 'trends' && <Trends ledger={ledger}/>} {page === 'goals' && <Goals ledger={ledger} update={l => session.edit(l)}/>} {page === 'settings' && <Settings session={session} ledger={ledger} signOut={signOut}/>}<p className="footer-note">A clear plan. A little peace of mind.</p></main></div></div>;
 }
 
 function SetupScreen({ error = '' }: { error?: string }) {
-  return <main className="setup-shell"><a className="brand" href="/"><span className="brand-mark">B</span><span>Budget</span></a><div className="setup-grid"><section className="setup-copy"><p className="eyebrow">Your money, with a plan</p><h1>A little clarity.<br/>A lot more possible<span className="accent">.</span></h1><p>A private place for everyday spending, thoughtful plans, and the things you’re saving for.</p><div className="setup-features"><span>◎ Savings goals</span><span>▤ Flexible pay periods</span><span>⌁ Clear spending trends</span></div></section><section className="setup-card"><p className="eyebrow">Connection setup</p><h2>Connect your Azure account</h2><p className="muted">This deployment needs its public Microsoft sign-in and Azure API configuration before it can open a budget.</p>{error && <p className="error" role="status">{error}</p>}<ol className="setup-steps"><li>Register the web redirect URI with Microsoft Entra.</li><li>Expose the API’s delegated <code>Budget.Access</code> scope.</li><li>Set the four public values in <code>web/.env.example</code>, then rebuild and deploy.</li></ol><p className="privacy-note">No account is signed in. No financial records are loaded. The app will use Microsoft sign-in and your app passcode once the connection is configured.</p><a href="https://learn.microsoft.com/entra/identity-platform/v2-oauth2-auth-code-flow" target="_blank" rel="noreferrer" className="text-button">Microsoft sign-in setup ↗</a></section></div><p className="footer-note">Private records. Purposeful plans.</p></main>;
+  return <main className="setup-shell">
+    <a className="brand" href="/"><span className="brand-mark">B</span><span>Budget</span></a>
+    <div className="setup-grid">
+      <section className="setup-copy">
+        <p className="eyebrow">Your money, with a plan</p>
+        <h1>A little clarity.<br/>A lot more possible<span className="accent">.</span></h1>
+        <p>A private place for everyday spending, thoughtful plans, and the things you’re saving for.</p>
+        <div className="setup-features"><span>◎ Savings goals</span><span>▤ Flexible pay periods</span><span>⌁ Clear spending trends</span></div>
+      </section>
+      <section className="setup-card">
+        <p className="eyebrow">Getting ready</p>
+        <h2>Sign-in isn’t available yet</h2>
+        <p className="muted">This website’s account service has not been connected. Once it is ready, you can create a budget-app account and use the same login on your devices.</p>
+        {error && <p className="error" role="status">{error}</p>}
+        <p className="privacy-note">You won’t need a Microsoft or Azure account. No financial records have been loaded.</p>
+      </section>
+    </div>
+    <p className="footer-note">Private records. Purposeful plans.</p>
+  </main>;
+}
+
+function AccountLogin({ config, onSignIn }: { config: PublicConfig; onSignIn: (session: BudgetSession) => void }) {
+  const [create, setCreate] = useState(false), [username, setUsername] = useState('');
+  const [password, setPassword] = useState(''), [confirmation, setConfirmation] = useState('');
+  const [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const generation = useRef(0);
+  useEffect(() => () => { generation.current++; }, []);
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (busy) return;
+    if (create && password !== confirmation) { setError('The passwords do not match.'); return; }
+    const version = generation.current;
+    setBusy(true); setError('');
+    try {
+      const auth = await authenticate(config, username, password, create);
+      const session = new BudgetSession(new BudgetApi(config, auth));
+      if (version !== generation.current) { session.dispose(); return; }
+      setPassword(''); setConfirmation('');
+      onSignIn(session);
+    } catch (cause) {
+      if (version === generation.current) setError(cause instanceof Error ? cause.message : 'The secure connection is unavailable. Try again.');
+    } finally {
+      if (version === generation.current) { setBusy(false); setPassword(''); setConfirmation(''); }
+    }
+  }
+  return <main className="entry-shell"><section className="entry-card">
+    <div className="brand-mark">B</div>
+    <p className="eyebrow">Your private budget</p>
+    <h1>{create ? 'Make room for your goals' : 'Welcome back'}<span className="accent">.</span></h1>
+    <p className="muted">{create ? 'Create your budget-app account. Use the same login on your other devices.' : 'Sign in to your budget-app account to connect your devices.'}</p>
+    <form onSubmit={submit} autoComplete="off">
+      <label className="field">Username<input name="username" value={username} autoComplete="off" autoCapitalize="none" spellCheck={false} minLength={3} maxLength={64} required disabled={busy} onChange={e => setUsername(e.target.value)}/><span className="muted">3–64 letters, numbers, dots, underscores, or hyphens.</span></label>
+      <label className="field">Account password<input name="password" type="password" autoComplete="off" minLength={12} maxLength={128} required value={password} disabled={busy} onChange={e => setPassword(e.target.value)}/>{create && <span className="muted">Use 12–128 characters. This password protects your encrypted budget and cannot be recovered or reset.</span>}</label>
+      {create && <label className="field">Confirm account password<input name="confirm-password" type="password" autoComplete="off" minLength={12} maxLength={128} required value={confirmation} disabled={busy} onChange={e => setConfirmation(e.target.value)}/></label>}
+      {error && <p className="error" role="alert">{error}</p>}
+      <button className="primary full" disabled={busy}>{busy ? 'Connecting securely…' : create ? 'Create account' : 'Sign in'}</button>
+    </form>
+    <button className="text-button" disabled={busy} onClick={() => { setCreate(!create); setPassword(''); setConfirmation(''); setError(''); }}>{create ? 'Already have an account? Sign in' : 'New here? Create an account'}</button>
+    <p className="privacy-note">Your password stays on this device. Budget records are encrypted before syncing. No AI service is connected.</p>
+    {!create && <p className="privacy-note">Forgot your account password? It cannot be recovered or reset because it protects your budget’s encryption key.</p>}
+  </section></main>;
 }
 
 function App() {
-  const [config, setConfig] = useState<PublicConfig | null>(null), [session, setSession] = useState<BudgetSession | null>(null), [loading, setLoading] = useState(true), [error, setError] = useState(''), [busy, setBusy] = useState(false);
-  const redirectUri = window.location.origin + window.location.pathname;
+  const [config, setConfig] = useState<PublicConfig | null>(null);
+  const [session, setSession] = useState<BudgetSession | null>(null);
+  const [loading, setLoading] = useState(true), [error, setError] = useState('');
   useEffect(() => {
-    let active = true;
+    const controller = new AbortController();
     void (async () => {
       try {
-        const response = await fetch('/config.json', { cache: 'no-store', credentials: 'omit', redirect: 'error' });
-        if (!response.ok) throw new Error('The public connection configuration is unavailable.');
+        const response = await fetch('/config.json', { cache: 'no-store', credentials: 'omit', redirect: 'error', signal: controller.signal });
+        if (!response.ok) throw new Error('The account service configuration is unavailable.');
         const publicConfig = validatePublicConfig(await response.json());
-        if (!active) return;
-        setConfig(publicConfig);
-        if (publicConfig) {
-          const auth = await completeSignIn(publicConfig, window.location.search, redirectUri, sessionStorage);
-          if (!active) return;
-          if (auth) setSession(new BudgetSession(new BudgetApi(publicConfig, auth)));
-        }
-      } catch (cause) { if (active) setError(cause instanceof Error ? cause.message : 'Sign-in could not be completed.'); }
-      finally { if (new URLSearchParams(window.location.search).has('code') || new URLSearchParams(window.location.search).has('error')) history.replaceState(null, '', window.location.pathname); if (active) setLoading(false); }
+        if (!controller.signal.aborted) setConfig(publicConfig);
+      } catch {
+        if (!controller.signal.aborted) setError('The account service configuration could not be loaded. Please try again later.');
+      } finally { if (!controller.signal.aborted) setLoading(false); }
     })();
-    return () => { active = false; };
+    return () => controller.abort();
   }, []);
-  async function signIn() { if (!config) return; setBusy(true); setError(''); try { window.location.assign(await authorizationURL(config, redirectUri, sessionStorage)); } catch { setError('Secure sign-in could not start. Enable session storage and try again.'); setBusy(false); } }
-  function signOut() { session?.dispose(); setSession(null); setError(''); }
+  function signOut() { session?.dispose(); setSession(null); }
   if (loading) return <main className="entry-shell"><div className="entry-card"><div className="brand-mark">B</div><p role="status">Preparing your private money space…</p></div></main>;
   if (!config) return <SetupScreen error={error}/>;
   if (session) return <BudgetApp session={session} signOut={signOut}/>;
-  return <main className="entry-shell"><section className="entry-card"><div className="brand-mark">B</div><p className="eyebrow">Your money, with a plan</p><h1>A little clarity.<br/>A lot more possible<span className="accent">.</span></h1><p className="muted">A private place to plan your spending and make room for your goals.</p>{error && <p className="error" role="alert">{error}</p>}<button className="primary full" onClick={signIn} disabled={busy}>{busy ? 'Opening Microsoft…' : 'Continue with Microsoft'}</button><p className="privacy-note">Microsoft sign-in connects your account. Your app passcode unlocks your budget. Financial records and access tokens stay in memory while this page is open.</p></section></main>;
+  return <AccountLogin config={config} onSignIn={setSession}/>;
 }
 
 createRoot(document.getElementById('root')!).render(<App/>);

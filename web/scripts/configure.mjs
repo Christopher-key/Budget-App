@@ -2,26 +2,22 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('../', import.meta.url));
 mkdirSync(root + 'public', { recursive: true });
-const names = ['VITE_AZURE_CLIENT_ID', 'VITE_AZURE_AUTHORITY', 'VITE_AZURE_SCOPE', 'VITE_API_BASE_URL'];
-const supplied = names.map(name => process.env[name]?.trim() ?? '');
+// Only a public API origin is exposed to the browser. Secrets are backend-only.
+const apiText = process.env.VITE_API_BASE_URL?.trim() ?? '';
 let config = { configured: false };
 let connect = "'self'";
-if (supplied.some(Boolean)) {
-  if (!supplied.every(Boolean)) throw new Error('Provide all four public Azure web configuration values.');
-  const [clientId, authorityText, scope, apiText] = supplied;
-  if (!/^[0-9a-f-]{36}$/i.test(clientId)) throw new Error('Invalid public application ID.');
-  const authority = new URL(authorityText);
-  const api = new URL(apiText);
-  if (authority.protocol !== 'https:' || authority.username || authority.password || authority.search || authority.hash ||
-      !(authority.hostname === 'login.microsoftonline.com' || authority.hostname.endsWith('.ciamlogin.com'))) {
-    throw new Error('Use the exact Microsoft tenant authority over HTTPS.');
+if (apiText) {
+  let api;
+  try { api = new URL(apiText); }
+  catch { throw new Error('Provide a valid public account-service origin.'); }
+  const localAPI = ['localhost', '127.0.0.1'].includes(api.hostname);
+  const production = process.argv.includes('--production') || process.env.NODE_ENV === 'production';
+  if ((api.protocol !== 'https:' && !(!production && localAPI && api.protocol === 'http:')) ||
+      api.username || api.password || api.search || api.hash || api.pathname !== '/') {
+    throw new Error('Provide the HTTPS account-service origin only, without /api or credentials.');
   }
-  const localAPI = api.hostname === 'localhost' || api.hostname === '127.0.0.1';
-  if ((api.protocol !== 'https:' && !(process.env.NODE_ENV !== 'production' && localAPI && api.protocol === 'http:')) ||
-      api.username || api.password || api.search || api.hash || api.pathname !== '/') throw new Error('Use the API origin only, such as https://your-function-app.azurewebsites.net (without /api).');
-  if (!/^api:\/\/[0-9a-f-]{36}\/Budget\.Access$/i.test(scope)) throw new Error('Request only the registered Budget.Access API scope.');
-  config = { configured: true, clientId, authority: authority.href.replace(/\/$/, ''), scope, apiBaseUrl: api.href.replace(/\/$/, '') };
-  connect += ` ${authority.origin} ${api.origin}`;
+  config = { configured: true, apiBaseUrl: api.origin };
+  connect += ` ${api.origin}`;
 }
 writeFileSync(root + 'public/config.json', JSON.stringify(config));
 const policy = `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ${connect}; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests`;
@@ -29,7 +25,7 @@ const swa = {
   navigationFallback: { rewrite: '/index.html', exclude: ['/api/*', '/*.{css,js,svg,json,webmanifest}'] },
   globalHeaders: {
     'Content-Security-Policy': policy, 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff',
-    'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), browsing-topics=()',
     'Cache-Control': 'no-store', 'Strict-Transport-Security': 'max-age=31536000; includeSubDomains'
   },
   routes: [{ route: '/api/*', headers: { 'Cache-Control': 'no-store' } }]

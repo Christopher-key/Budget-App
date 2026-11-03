@@ -1,148 +1,87 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, randomBytes } from 'node:crypto';
-import { generateKeyPair, SignJWT } from 'jose';
-import { authenticator, authenticationConfig } from '../dist/api/src/auth.js';
+import { AuthenticationService, authenticationConfig } from '../dist/api/src/auth.js';
+import { MemoryRepository } from '../dist/api/src/repository.js';
+import { config, fixture, proof, wrapped, errorIs, now } from './helpers.mjs';
 
-const tenantId = '10000000-0000-4000-8000-000000000001';
-const audience = '20000000-0000-4000-8000-000000000002';
-const clientId = '30000000-0000-4000-8000-000000000003';
-const otherClientId = '30000000-0000-4000-8000-000000000004';
-const objectId = '40000000-0000-4000-8000-000000000004';
-const issuer = `https://login.microsoftonline.com/${tenantId}/v2.0`;
-const environment = {
-  AUTH_ISSUER: issuer,
-  AUTH_AUDIENCE: audience,
-  AUTH_TENANT_ID: tenantId,
-  AUTH_ALLOWED_CLIENT_IDS: `${clientId}, ${otherClientId}`,
-};
-const config = authenticationConfig(environment);
-const keys = await generateKeyPair('RS256');
-const otherKeys = await generateKeyPair('RS256');
-const verify = authenticator(config, async () => keys.publicKey);
+const headers = token => new Headers({ Authorization: 'Bearer ' + token });
 
-function claims(overrides = {}) {
-  const now = Math.floor(Date.now() / 1000);
-  return {
-    iss: issuer, aud: audience, ver: '2.0', oid: objectId, tid: tenantId,
-    azp: clientId, scp: 'openid Budget.Access', iat: now, exp: now + 600,
-    ...overrides,
-  };
-}
-
-async function signed(overrides = {}, signingKey = keys.privateKey) {
-  return new SignJWT(claims(overrides)).setProtectedHeader({ alg: 'RS256', typ: 'JWT' }).sign(signingKey);
-}
-
-function bearer(token, extra = {}) {
-  return new Headers({ authorization: `Bearer ${token}`, ...extra });
-}
-
-function authRequired(error) {
-  assert.equal(error.status, 401);
-  assert.equal(error.code, 'AUTH_REQUIRED');
-  assert.equal(error.message, 'AUTH_REQUIRED');
-  return true;
-}
-
-test('authentication configuration requires pinned Microsoft issuer, tenant, API audience and client IDs', () => {
-  assert.deepEqual(config, { issuer, audience, tenantId, allowedClientIds: [clientId, otherClientId] });
-  assert.equal(authenticationConfig({ ...environment, AUTH_ISSUER: issuer + '/' }).issuer, issuer);
-  assert.equal(authenticationConfig({ ...environment,
-    AUTH_ISSUER: `https://example.ciamlogin.com/${tenantId}/v2.0`,
-  }).tenantId, tenantId);
-
-  const invalid = [
-    {},
-    { ...environment, AUTH_ISSUER: `http://login.microsoftonline.com/${tenantId}/v2.0` },
-    { ...environment, AUTH_ISSUER: `https://login.microsoftonline.com.attacker.example/${tenantId}/v2.0` },
-    { ...environment, AUTH_ISSUER: `https://ciamlogin.com.attacker.example/${tenantId}/v2.0` },
-    { ...environment, AUTH_ISSUER: `https://user@login.microsoftonline.com/${tenantId}/v2.0` },
-    { ...environment, AUTH_ISSUER: issuer + '?tenant=another' },
-    { ...environment, AUTH_ISSUER: issuer + '#fragment' },
-    { ...environment, AUTH_ISSUER: `https://login.microsoftonline.com/common/v2.0` },
-    { ...environment, AUTH_ISSUER: `https://login.microsoftonline.com/${objectId}/v2.0` },
-    { ...environment, AUTH_AUDIENCE: 'not-an-application-id' },
-    { ...environment, AUTH_TENANT_ID: 'common' },
-    { ...environment, AUTH_ALLOWED_CLIENT_IDS: '' },
-    { ...environment, AUTH_ALLOWED_CLIENT_IDS: clientId + ',invalid' },
-  ];
-  for (const entry of invalid) assert.throws(() => authenticationConfig(entry));
+test('app-owned registration stores only pseudonymous lookup, salted verifier and token hash', async () => {
+  const { repository, identity, session, credentials } = await fixture(undefined, { setup: false });
+  const stored = await repository.read(identity.ownerId), serialized = JSON.stringify(stored);
+  assert.match(session.token, /^[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}$/);
+  for (const privateValue of [credentials.username, credentials.proof, session.token]) assert.ok(!serialized.includes(privateValue));
+  assert.match(stored.access.credentials.verifier.salt, /^[A-Za-z0-9_-]{43}$/);
+  assert.match(stored.access.credentials.verifier.hash, /^[A-Za-z0-9_-]{43}$/);
+  assert.notEqual(stored.access.credentials.verifier.hash, credentials.proof);
+  assert.equal(stored.access.sessions.length, 1);
+  assert.equal(stored.access.credentials.wrappedKey.data.length, 64);
+  assert.equal(stored.ledger, null);
 });
 
-test('a verified tenant and object ID determine the owner independently of subject, app or account headers', async () => {
-  const first = await verify(bearer(await signed({ sub: 'first-subject', accountId: 'untrusted-first' })));
-  const second = await verify(bearer(await signed({ sub: 'different-subject', accountId: 'untrusted-second', azp: otherClientId }), {
-    'x-owner-id': 'untrusted-owner', 'x-account-id': 'untrusted-account',
-    'x-ms-client-principal-id': 'untrusted-gateway-owner',
-  }));
-  const expected = createHash('sha256').update(issuer + '\0' + tenantId + '\0' + objectId).digest('base64url');
-  assert.deepEqual(first, { ownerId: expected });
-  assert.deepEqual(second, first);
-  const other = await verify(bearer(await signed({ oid: '50000000-0000-4000-8000-000000000005' })));
-  assert.notEqual(other.ownerId, first.ownerId);
+test('normalised app username signs into the same account from a second device', async () => {
+  const { auth, identity, credentials } = await fixture(undefined, { setup: false });
+  const params = await auth.parameters({ username: '  SYNTHETIC-OWNER ' });
+  assert.deepEqual(params, { accountId: identity.ownerId, salt: credentials.salt, iterations: 600000 });
+  const second = await auth.login({ username: 'SYNTHETIC-OWNER', proof: credentials.proof });
+  assert.equal(second.accountId, identity.ownerId);
+  assert.deepEqual(second.wrappedKey, credentials.wrappedKey);
+  assert.notEqual(second.token, credentials.proof);
+  assert.equal((await auth.authenticate(headers(second.token))).ownerId, identity.ownerId);
 });
 
-test('gateway identity headers cannot replace a signed bearer token', async () => {
-  let resolutions = 0;
-  const guarded = authenticator(config, async () => { resolutions++; return keys.publicKey; });
-  for (const headers of [
-    new Headers(),
-    new Headers({ 'x-ms-client-principal': 'untrusted', 'x-ms-client-principal-id': objectId }),
-    new Headers({ authorization: 'Basic untrusted' }),
-    new Headers({ authorization: 'Bearer malformed' }),
-  ]) await assert.rejects(guarded(headers), authRequired);
-  assert.equal(resolutions, 0);
+test('three public account-password failures never erase budget, keys or app-passcode count', async () => {
+  const { repository, auth, identity } = await fixture();
+  const before = await repository.read(identity.ownerId);
+  for (let i = 0; i < 3; i++) await assert.rejects(auth.login({ username: 'synthetic-owner', proof: proof() }), errorIs(401, 'INVALID_LOGIN'));
+  const after = await repository.read(identity.ownerId);
+  assert.deepEqual(after, before);
+  assert.equal(after.access.failures, 0);
 });
 
-test('JWT signature verification fails closed with a key that did not sign the access token', async () => {
-  await assert.rejects(verify(bearer(await signed({}, otherKeys.privateKey))), authRequired);
+test('unknown usernames have plausible deterministic parameters and cannot authenticate', async () => {
+  const auth = new AuthenticationService(new MemoryRepository(), config, () => now);
+  const a = await auth.parameters({ username: 'unknown-account' });
+  assert.deepEqual(await auth.parameters({ username: 'UNKNOWN-ACCOUNT' }), a);
+  assert.match(a.salt, /^[A-Za-z0-9_-]{43}$/);
+  assert.match(a.accountId, /^[A-Za-z0-9_-]{43}$/);
+  await assert.rejects(auth.login({ username: 'unknown-account', proof: proof() }), errorIs(401, 'INVALID_LOGIN'));
 });
 
-test('JWT validation rejects incorrect issuer, audience, tenant, client, version and scopes', async t => {
-  const cases = [
-    ['issuer', { iss: 'https://attacker.example/issuer' }],
-    ['API audience', { aud: otherClientId }],
-    ['tenant', { tid: '50000000-0000-4000-8000-000000000005' }],
-    ['unlisted client', { azp: '60000000-0000-4000-8000-000000000006' }],
-    ['missing client', { azp: undefined }],
-    ['object ID format', { oid: 'client-selected-owner' }],
-    ['missing object ID', { oid: undefined }],
-    ['token version', { ver: '1.0' }],
-    ['missing scope', { scp: undefined }],
-    ['different scope', { scp: 'openid Other.Access' }],
-    ['scope substring', { scp: 'openid PrefixBudget.AccessSuffix' }],
-    ['non-string scope', { scp: ['Budget.Access'] }],
-  ];
-  for (const [name, overrides] of cases) {
-    await t.test(name, async () => assert.rejects(verify(bearer(await signed(overrides))), authRequired));
-  }
+test('opaque session tokens expire, reject tampering and revoke independently', async () => {
+  const { auth, credentials, identity, session, setTime } = await fixture(undefined, { setup: false });
+  const second = await auth.login(credentials);
+  await assert.rejects(auth.authenticate(headers(session.token.slice(0, -1) + 'X')), errorIs(401, 'AUTH_REQUIRED'));
+  await assert.rejects(auth.authenticate(new Headers({ 'x-ms-client-principal-id': identity.ownerId })), errorIs(401, 'AUTH_REQUIRED'));
+  await auth.logout(identity);
+  await assert.rejects(auth.authenticate(headers(session.token)), errorIs(401, 'AUTH_REQUIRED'));
+  assert.equal((await auth.authenticate(headers(second.token))).ownerId, identity.ownerId);
+  setTime(now + 30 * 60000);
+  await assert.rejects(auth.authenticate(headers(second.token)), errorIs(401, 'AUTH_REQUIRED'));
 });
 
-test('JWT validation rejects expired, premature, over-age and missing lifetime claims', async t => {
-  const now = Math.floor(Date.now() / 1000);
-  const cases = [
-    ['expired', { iat: now - 120, exp: now - 60 }],
-    ['not yet valid', { nbf: now + 60 }],
-    ['future issued-at', { iat: now + 60 }],
-    ['older than maximum age', { iat: now - 7300, exp: now + 600 }],
-    ['missing expiry', { exp: undefined }],
-    ['missing issued-at', { iat: undefined }],
-  ];
-  for (const [name, overrides] of cases) {
-    await t.test(name, async () => assert.rejects(verify(bearer(await signed(overrides))), authRequired));
-  }
+test('same client proof receives independent random slow-hash salt for each account', async () => {
+  const first = await fixture(undefined, { setup: false });
+  const second = await first.auth.register({ ...first.credentials, username: 'another-account' }, 'second-source');
+  const a = (await first.repository.read(first.identity.ownerId)).access.credentials.verifier;
+  const b = (await first.repository.read(second.accountId)).access.credentials.verifier;
+  assert.notEqual(a.salt, b.salt); assert.notEqual(a.hash, b.hash);
 });
 
-test('only the pinned RS256 algorithm is accepted', async () => {
-  const hmac = await new SignJWT(claims()).setProtectedHeader({ alg: 'HS256' }).sign(randomBytes(32));
-  await assert.rejects(verify(bearer(hmac)), authRequired);
-  const unsigned = Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url') + '.'
-    + Buffer.from(JSON.stringify(claims())).toString('base64url') + '.';
-  await assert.rejects(verify(bearer(unsigned)), authRequired);
+test('persistent parameter limits are shared by separate auth service instances and expire', async () => {
+  const repository = new MemoryRepository(); let time = now;
+  const a = new AuthenticationService(repository, config, () => time), b = new AuthenticationService(repository, config, () => time);
+  for (let i = 0; i < 60; i++) await (i % 2 ? a : b).parameters({ username: 'unknown-account' });
+  await assert.rejects(b.parameters({ username: 'unknown-account' }), errorIs(429, 'RATE_LIMITED'));
+  time += 60000;
+  assert.ok((await a.parameters({ username: 'unknown-account' })).salt);
 });
 
-test('a key-resolution failure returns only the safe authentication error', async () => {
-  const unavailable = authenticator(config, async () => { throw new Error('private upstream diagnostic'); });
-  await assert.rejects(unavailable(bearer(await signed())), authRequired);
+test('missing secrets and malformed public credentials fail closed', async () => {
+  assert.throws(() => authenticationConfig({}), /configuration/);
+  assert.throws(() => authenticationConfig({ AUTH_LOOKUP_KEY: 'weak', AUTH_PEPPER: config.pepper }), /configuration/);
+  const auth = new AuthenticationService(new MemoryRepository(), config, () => now);
+  for (const username of ['a', 'two words', 'üsername', '../user']) await assert.rejects(auth.parameters({ username }), errorIs(400, 'INVALID_DATA'));
+  await assert.rejects(auth.register({ username: 'valid-user', proof: 'plaintext-password', salt: proof(), wrappedKey: wrapped() }), errorIs(400, 'INVALID_DATA'));
+  await assert.rejects(auth.register({ username: 'valid-user', proof: proof(), salt: proof(), wrappedKey: { ...wrapped(), data: 'plaintext-key' } }), errorIs(400, 'INVALID_DATA'));
 });

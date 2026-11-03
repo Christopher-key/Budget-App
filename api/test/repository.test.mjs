@@ -4,7 +4,8 @@ import { CosmosRepository } from '../dist/api/src/repository.js';
 
 const owner = 'synthetic-owner';
 const access = { id: 'access', ownerId: owner, state: 'locked', epoch: 1, version: 1, revision: 0 };
-const ledger = { id: 'ledger', ownerId: owner, epoch: 1, revision: 0, ledger: { schemaVersion: 1 } };
+const payload = { v: 1, iv: Buffer.alloc(12, 1).toString('base64url'), data: Buffer.alloc(48, 2).toString('base64url') };
+const ledger = { id: 'ledger', ownerId: owner, epoch: 1, revision: 0, payload };
 
 function mockContainer(batch = async operations => ({ code: 200, result: operations.map(() => ({ statusCode: 200 })) })) {
   const calls = [];
@@ -75,4 +76,54 @@ test('Cosmos reads an erased account without loading financial records', async (
   assert.equal(result.etag, 'version');
   assert.equal(result.access.state, 'erased');
   assert.deepEqual(reads, [{ id: 'access', partition: owner }]);
+});
+
+
+test('account-only checks never load encrypted financial payloads, and full reads preserve ciphertext exactly', async () => {
+  const reads = [];
+  const repository = new CosmosRepository({ item(id, partition) {
+    reads.push({ id, partition });
+    return { async read() { return { resource: id === 'access' ? { ...access, _etag: 'current' } : ledger }; } };
+  } });
+  const statusOnly = await repository.read(owner, false);
+  assert.equal(statusOnly.ledger, null);
+  assert.deepEqual(reads, [{ id: 'access', partition: owner }]);
+  reads.length = 0;
+  const full = await repository.read(owner);
+  assert.deepEqual(full.ledger, ledger);
+  assert.deepEqual(reads, [{ id: 'access', partition: owner }, { id: 'ledger', partition: owner }]);
+});
+
+test('Cosmos rate counters share atomic persistent buckets and expire without storing usernames or IP addresses', async () => {
+  const documents = new Map(); let serial = 0;
+  const calls = [];
+  const container = {
+    item(id, partition) { return { async read() {
+      const resource = documents.get(partition);
+      if (!resource) throw { code: 404 };
+      return { resource: structuredClone(resource) };
+    } }; },
+    items: { async batch(operations, partition) {
+      const [operation] = operations;
+      const existing = documents.get(partition);
+      if ((operation.operationType === 'Create' && existing) || (operation.operationType === 'Replace' && existing?._etag !== operation.ifMatch)) {
+        return { code: 412, result: [{ statusCode: 412 }] };
+      }
+      calls.push({ operations, partition });
+      documents.set(partition, { ...structuredClone(operation.resourceBody), _etag: String(++serial) });
+      return { code: 200, result: [{ statusCode: 200 }] };
+    } },
+  };
+  const a = new CosmosRepository(container), b = new CosmosRepository(container);
+  const outcomes = await Promise.all([a.consumeRate('opaque-source', 2, 60000, 100000), b.consumeRate('opaque-source', 2, 60000, 100000), a.consumeRate('opaque-source', 2, 60000, 100000)]);
+  assert.equal(outcomes.filter(Boolean).length, 2);
+  assert.equal(await b.consumeRate('opaque-source', 2, 60000, 159999), false);
+  assert.equal(await a.consumeRate('opaque-source', 2, 60000, 160000), true);
+  const counter = documents.get('rate:opaque-source');
+  assert.equal(counter.count, 1);
+  assert.equal(counter.ttl, 120);
+  assert.equal(counter.start, 160000);
+  assert.ok(calls.every(call => call.partition === 'rate:opaque-source'));
+  assert.ok(calls.slice(1).every(call => call.operations[0].ifMatch));
+  assert.deepEqual(Object.keys(counter).sort(), ['_etag', 'count', 'id', 'ownerId', 'start', 'ttl']);
 });

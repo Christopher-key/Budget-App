@@ -5,12 +5,10 @@
     "location": { "value": "REPLACE_WITH_SUPPORTED_AZURE_REGION" },
     "namePrefix": { "value": "REPLACE_WITH_LOWERCASE_PREFIX" },
     "frontendOrigin": { "value": "https://REPLACE_WITH_EXISTING_SWA_HOSTNAME" },
-    "authIssuer": { "value": "https://REPLACE_WITH_ISSUER_HOST/REPLACE_WITH_TENANT_ID/v2.0" },
-    "authAudience": { "value": "REPLACE_WITH_API_APPLICATION_ID_GUID" },
-    "authTenantId": { "value": "REPLACE_WITH_TENANT_ID_GUID" },
-    "authAllowedClientIds": { "value": "REPLACE_WITH_SPA_APPLICATION_ID_GUID,REPLACE_WITH_NATIVE_APPLICATION_ID_GUID" },
-    "databaseName": { "value": "REPLACE_WITH_DATABASE_NAME" },
-    "containerName": { "value": "REPLACE_WITH_CONTAINER_NAME" },
-    "deploymentPackageBlobName": { "value": "REPLACE_WITH_IMMUTABLE_RELEASE_NAME.zip" }
+    "authLookupKey": { "value": "REPLACE_USING_CREATE_PARAMETERS_SCRIPT" },
+    "authPepper": { "value": "REPLACE_USING_CREATE_PARAMETERS_SCRIPT" },
+    "databaseName": { "value": "budget" },
+    "containerName": { "value": "accounts" },
+    "deploymentPackageBlobName": { "value": "budget-api-release-001.zip" }
   }
 }

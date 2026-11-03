@@ -1,7 +1,9 @@
 import type { AccountStatus, BudgetEnvelope, Ledger, UnlockResponse } from '../../shared/contracts.js';
+import type { EncryptedBudgetEnvelope } from '../../shared/cloud.js';
 import { UNLOCK_HEADER } from '../../shared/contracts.js';
-import { validateLedger, monthId, newMonth } from '../../shared/model.js';
+import { emptyLedger, validateLedger, monthId, newMonth } from '../../shared/model.js';
 import type { AuthSession, PublicConfig } from './auth.js';
+import { decryptLedger, encryptLedger } from './crypto.js';
 
 export class ApiError extends Error {
   constructor(public code: string, public status: number, public epoch?: number) { super(code); }
@@ -9,42 +11,57 @@ export class ApiError extends Error {
 const validCounter = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
 function validateGrant(value: UnlockResponse): UnlockResponse {
   if (!value || !validCounter(value.epoch) || typeof value.unlockToken !== 'string' ||
-      !value.unlockToken || value.unlockToken.length > 2048 || typeof value.expiresAt !== 'string' ||
-      !Number.isFinite(Date.parse(value.expiresAt)) || Date.parse(value.expiresAt) <= Date.now()) {
-    throw new ApiError('UNAVAILABLE', 503);
-  }
+      !/^[A-Za-z0-9_-]{43}$/.test(value.unlockToken) || typeof value.expiresAt !== 'string' ||
+      !Number.isFinite(Date.parse(value.expiresAt)) || Date.parse(value.expiresAt) <= Date.now() ||
+      Date.parse(value.expiresAt) > Date.now() + 610_000) throw new ApiError('UNAVAILABLE', 503);
   return value;
 }
 export class BudgetApi {
   private grant = '';
   private generation = 0;
-  private pending = new Set<AbortController>();
-  constructor(private config: PublicConfig, private auth: AuthSession, private fetcher: typeof fetch = fetch.bind(globalThis)) {}
+  private pending = new Map<AbortController, { write: boolean; retained: boolean }>();
+  private auth: AuthSession | undefined;
+  constructor(private config: PublicConfig, auth: AuthSession, private fetcher: typeof fetch = fetch.bind(globalThis)) { this.auth = auth; }
   setGrant(value: string) { this.grant = value; }
-  isAuthenticated() { return !!this.auth.accessToken && Date.now() < this.auth.expiresAt; }
-  clear() {
+  isAuthenticated() { return !!this.auth?.accessToken && Date.now() < this.auth.expiresAt; }
+  clear(preserveWrites = false) {
     this.grant = ''; this.generation++;
-    for (const request of this.pending) request.abort();
-    this.pending.clear();
+    for (const [controller, request] of this.pending) {
+      if (preserveWrites && request.write) request.retained = true;
+      else { controller.abort(); this.pending.delete(controller); }
+    }
   }
-  forgetAuthentication() { this.clear(); this.auth = { accessToken: '', expiresAt: 0 }; }
+  forgetAuthentication(preserveWrites = false) { this.clear(preserveWrites); this.auth = undefined; }
+  private authenticated(): AuthSession {
+    if (!this.auth || !this.isAuthenticated()) throw new ApiError('AUTH_REQUIRED', 401);
+    return this.auth;
+  }
   async request<T>(path: string, method = 'GET', body?: unknown, unlocked = false): Promise<T> {
-    if (!this.isAuthenticated()) throw new ApiError('AUTH_REQUIRED', 401);
-    if (unlocked && !this.grant) throw new ApiError('LOCKED', 401);
+    const accessToken = this.authenticated().accessToken;
+    if (unlocked && !this.grant) throw new ApiError('LOCKED', 423);
+    // Capture the lease while it is active. An encrypted write already being
+    // prepared may finish after locking; later requests cannot reuse this lease.
+    const grant = this.grant;
     const generation = this.generation;
-    const controller = new AbortController(); this.pending.add(controller);
+    const controller = new AbortController();
+    const request = { write: path === 'budget' && method === 'PUT', retained: false };
+    this.pending.set(controller, request);
     try {
-      const headers: Record<string, string> = { Authorization: `Bearer ${this.auth.accessToken}` };
-      if (body !== undefined) headers['Content-Type'] = 'application/json';
-      if (unlocked) headers[UNLOCK_HEADER] = this.grant;
+      const preparedBody = await body;
+      if (generation !== this.generation && !request.retained) throw new ApiError('LOCKED', 423);
+      if (controller.signal.aborted) throw new ApiError('UNAVAILABLE', 503);
+      const headers: Record<string, string> = { Authorization: `Bearer ${accessToken}` };
+      if (preparedBody !== undefined) headers['Content-Type'] = 'application/json';
+      if (unlocked) headers[UNLOCK_HEADER] = grant;
       const response = await this.fetcher(this.config.apiBaseUrl + '/api/' + path, {
-        method, headers, body: body === undefined ? undefined : JSON.stringify(body),
+        method, headers, body: preparedBody === undefined ? undefined : JSON.stringify(preparedBody),
         credentials: 'omit', cache: 'no-store', redirect: 'error', signal: controller.signal,
       });
-      if (generation !== this.generation) throw new ApiError('LOCKED', 401);
+      if (generation !== this.generation && !request.retained) throw new ApiError('LOCKED', 423);
+      if (response.status === 204 && response.ok) return undefined as T;
       let value: any;
       try { value = await response.json(); } catch { throw new ApiError('UNAVAILABLE', response.status); }
-      if (generation !== this.generation) throw new ApiError('LOCKED', 401);
+      if (generation !== this.generation && !request.retained) throw new ApiError('LOCKED', 423);
       if (!response.ok) throw new ApiError(typeof value?.code === 'string' ? value.code : 'UNAVAILABLE', response.status,
         validCounter(value?.epoch) ? value.epoch : undefined);
       return value as T;
@@ -53,20 +70,111 @@ export class BudgetApi {
       throw new ApiError('UNAVAILABLE', 503);
     } finally { this.pending.delete(controller); }
   }
-  status() { return this.request<AccountStatus>('account/status'); }
-  setup(pin: string, expectedEpoch: number) { return this.request<UnlockResponse>('account/setup', 'POST', { pin, expectedEpoch, startEmpty: true }); }
+  async status() {
+    const accountId = this.authenticated().accountId;
+    const value = await this.request<AccountStatus>('account/status');
+    if (!value || value.accountId !== accountId) throw new ApiError('UNAVAILABLE', 503);
+    return value;
+  }
+  async setup(pin: string, expectedEpoch: number) {
+    const auth = this.authenticated(), generation = this.generation;
+    const payload = await encryptLedger(auth.dataKey, auth.accountId, expectedEpoch + 1, 0, emptyLedger());
+    if (generation !== this.generation) throw new ApiError('LOCKED', 423);
+    return this.request<UnlockResponse>('account/setup', 'POST', { pin, expectedEpoch, startEmpty: true, payload });
+  }
   unlock(pin: string) { return this.request<UnlockResponse>('account/unlock', 'POST', { pin, attemptId: crypto.randomUUID() }); }
-  budget() { return this.request<BudgetEnvelope>('budget', 'GET', undefined, true); }
-  save(epoch: number, revision: number, ledger: Ledger) {
-    return this.request<{ epoch: number; revision: number }>('budget', 'PUT', { epoch, revision, ledger: validateLedger(ledger) }, true);
+  async budget(): Promise<BudgetEnvelope> {
+    const auth = this.authenticated(), generation = this.generation;
+    const value = await this.request<EncryptedBudgetEnvelope>('budget', 'GET', undefined, true);
+    if (!value || !validCounter(value.epoch) || !validCounter(value.revision) || 'ledger' in value) throw new ApiError('UNAVAILABLE', 503);
+    let ledger: Ledger;
+    try { ledger = await decryptLedger(auth.dataKey, auth.accountId, value.epoch, value.revision, value.payload); }
+    catch { throw new ApiError('INVALID_ENCRYPTION', 503); }
+    if (generation !== this.generation) throw new ApiError('LOCKED', 423);
+    return { epoch: value.epoch, revision: value.revision, ledger };
+  }
+  async save(epoch: number, revision: number, ledger: Ledger) {
+    const auth = this.authenticated();
+    const encrypted = encryptLedger(auth.dataKey, auth.accountId, epoch, revision + 1, ledger);
+    // Register the write before Web Crypto resolves so locking can retain and
+    // await this operation even when it has not reached fetch() yet.
+    return this.request<{ epoch: number; revision: number }>('budget', 'PUT',
+      encrypted.then(payload => ({ epoch, revision, payload })), true);
   }
   changePin(newPin: string) { return this.request<UnlockResponse>('account/pin', 'POST', { newPin }, true); }
-  erase(epoch: number) { return this.request<{ epoch: number }>('account', 'DELETE', { epoch }); }
+  erase(epoch: number) { return this.request<{ epoch: number }>('account', 'DELETE', { epoch }, true); }
   async revoke() {
-    if (!this.grant || !this.isAuthenticated()) return;
-    // Isolated best-effort request: completion must never clear a later session.
+    if (!this.grant || !this.isAuthenticated() || !this.auth) return;
+    // Captured credentials belong to this lease only; completion cannot affect a later session.
     const headers = { Authorization: `Bearer ${this.auth.accessToken}`, [UNLOCK_HEADER]: this.grant, 'Content-Type': 'application/json' };
-    try { await this.fetcher(this.config.apiBaseUrl + '/api/account/lock', { method: 'POST', headers, body: '{}', credentials: 'omit', cache: 'no-store', redirect: 'error', keepalive: true }); } catch { /* lease expiry is enforced by the server */ }
+    try { await this.fetcher(this.config.apiBaseUrl + '/api/account/lock', { method: 'POST', headers, body: '{}', credentials: 'omit', cache: 'no-store', redirect: 'error', keepalive: true }); } catch { /* the server enforces lease expiry */ }
+  }
+  /** Start encryption before clearing UI state. Only ciphertext is queued for this bounded flush. */
+  finishBeforeLock(epoch: number, revision: number, queued: Ledger | undefined,
+    active: Promise<{ epoch: number; revision: number }> | undefined): Promise<boolean> {
+    if (!this.auth || !this.isAuthenticated() || !this.grant) return Promise.resolve(!queued && !active);
+    const headers = { Authorization: `Bearer ${this.auth.accessToken}`, [UNLOCK_HEADER]: this.grant, 'Content-Type': 'application/json' };
+    const expectedRevision = revision + (active ? 1 : 0);
+    const expectedEpoch = epoch;
+    let encrypted: Promise<{ payload?: import('../../shared/cloud.js').CipherBlob; failed?: true }> | undefined;
+    try { if (queued) encrypted = encryptLedger(this.auth.dataKey, this.auth.accountId, epoch, expectedRevision + 1, queued)
+      .then(payload => ({ payload }), () => ({ failed: true as const })); }
+    catch { return this.revoke().then(() => false); }
+    const existingWrites = [...this.pending].filter(([, request]) => request.write).map(([controller]) => controller);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => { controller.abort(); for (const request of existingWrites) request.abort(); }, 8_000);
+    // Promise.race is also necessary for adapters/browsers that do not honor abort.
+    let expire!: () => void;
+    const expired = new Promise<never>((_, reject) => { expire = () => reject(new ApiError('UNAVAILABLE', 503)); });
+    controller.signal.addEventListener('abort', expire, { once: true });
+    const prepared = encrypted; // No plaintext ledger is captured by the async continuation.
+    queued = undefined;
+    return (async () => {
+      let saved = true;
+      try {
+        if (active) {
+          const acknowledged = await Promise.race([active, expired]);
+          if (acknowledged.epoch !== expectedEpoch || acknowledged.revision !== expectedRevision) throw new ApiError('REVISION_CONFLICT', 409);
+        }
+        if (prepared) {
+          const result = await Promise.race([prepared, expired]);
+          if (result.failed || !result.payload) throw new ApiError('INVALID_ENCRYPTION', 503);
+          const payload = result.payload;
+          const response = await Promise.race([this.fetcher(this.config.apiBaseUrl + '/api/budget', {
+            method: 'PUT', headers, body: JSON.stringify({ epoch: expectedEpoch, revision: expectedRevision, payload }),
+            credentials: 'omit', cache: 'no-store', redirect: 'error', keepalive: true, signal: controller.signal,
+          }), expired]);
+          if (!response.ok) {
+            let code = response.status === 401 ? 'AUTH_REQUIRED' : response.status === 410 ? 'ACCOUNT_ERASED' : 'UNAVAILABLE';
+            try {
+              const failure = await Promise.race([response.json(), expired]);
+              if (['AUTH_REQUIRED', 'ACCOUNT_ERASED', 'STALE_EPOCH', 'REVISION_CONFLICT'].includes(failure?.code)) code = failure.code;
+            } catch { /* HTTP authentication/deletion failures still clear account keys. */ }
+            throw new ApiError(code, response.status);
+          }
+          const value = await Promise.race([response.json(), expired]);
+          if (value?.epoch !== expectedEpoch || value?.revision !== expectedRevision + 1) throw new ApiError('UNAVAILABLE', 503);
+        }
+      } catch (error) {
+        saved = false;
+        if (error instanceof ApiError && ['AUTH_REQUIRED', 'ACCOUNT_ERASED', 'STALE_EPOCH'].includes(error.code)) this.forgetAuthentication();
+      }
+      finally {
+        clearTimeout(timeout); controller.signal.removeEventListener('abort', expire);
+        // Revoke only after the final save acknowledgement/failure. This captured
+        // lease cannot revoke an unlock performed later on the same page.
+        try { await this.fetcher(this.config.apiBaseUrl + '/api/account/lock', { method: 'POST', headers, body: '{}', credentials: 'omit', cache: 'no-store', redirect: 'error', keepalive: true, signal: AbortSignal.timeout(3_000) }); } catch { /* server lease expiry remains authoritative */ }
+      }
+      return saved;
+    })();
+  }
+  async logout(after?: Promise<unknown>) {
+    if (!this.auth || !this.isAuthenticated()) return;
+    const headers = { Authorization: `Bearer ${this.auth.accessToken}`, 'Content-Type': 'application/json' };
+    try {
+      await after;
+      await this.fetcher(this.config.apiBaseUrl + '/api/auth/logout', { method: 'POST', headers, body: '{}', credentials: 'omit', cache: 'no-store', redirect: 'error', keepalive: true, signal: AbortSignal.timeout(3_000) });
+    } catch { /* the server enforces account-session expiry */ }
   }
 }
 
@@ -81,19 +189,21 @@ export class BudgetSession {
   private queue?: Ledger;
   private saving = false;
   private inFlight?: Promise<void>;
+  private activeSave?: Promise<{ epoch: number; revision: number }>;
+  private locking?: Promise<boolean>;
   private version = 0;
   constructor(public readonly api: BudgetApi) {}
   snapshot = () => this.state;
   subscribe = (callback: () => void) => { this.listeners.add(callback); return () => { this.listeners.delete(callback); }; };
   private publish(patch: Partial<SessionState>) { this.state = { ...this.state, ...patch }; for (const listener of this.listeners) listener(); }
-  private clear(phase: SessionPhase, message = '', epoch = this.state.epoch) {
+  private clear(phase: SessionPhase, message = '', epoch = this.state.epoch, preserveWrites = false) {
     this.version++; clearTimeout(this.timer); clearTimeout(this.lease); this.queue = undefined; this.saving = false;
-    this.api.clear(); this.publish({ phase, epoch, ledger: undefined, saving: false, message });
+    this.api.clear(preserveWrites); this.publish({ phase, epoch, ledger: undefined, saving: false, message });
   }
   private failure(error: unknown) {
     const code = error instanceof ApiError ? error.code : 'UNAVAILABLE';
     if (code === 'ACCOUNT_ERASED' || code === 'STALE_EPOCH') {
-      this.clear('erased', 'Your account budget data has been erased.', error instanceof ApiError ? error.epoch : undefined);
+      this.api.forgetAuthentication(); this.clear('erased', 'Your account and budget have been erased. Create an account to start again.', error instanceof ApiError ? error.epoch : undefined);
     } else if (code === 'AUTH_REQUIRED') {
       this.api.forgetAuthentication(); this.clear('signedOut', 'Please sign in again.');
     } else if (code === 'INCORRECT_PASSCODE') {
@@ -111,14 +221,25 @@ export class BudgetSession {
       if (!status || typeof status.accountId !== 'string' || !status.accountId || !validCounter(status.epoch) || !['new', 'locked', 'erased'].includes(status.state)) throw new ApiError('UNAVAILABLE', 503);
       if (this.state.accountId && this.state.accountId !== status.accountId) { this.clear('locked', 'Sign in again to load this account.'); return; }
       this.publish({ accountId: status.accountId });
-      if (status.state === 'erased') { this.clear('erased', 'Your account budget data has been erased.', status.epoch); return; }
+      if (status.state === 'erased') { this.api.forgetAuthentication(); this.clear('erased', 'Your account and budget have been erased.', status.epoch); return; }
       if (this.state.phase === 'ready' && (status.epoch !== this.state.epoch || status.state !== 'locked')) {
         this.clear('locked', 'This account changed. Unlock to load its current budget.', status.epoch); return;
+      }
+      if (this.state.phase === 'ready' && status.revision !== undefined && status.revision !== this.state.revision) {
+        if (!validCounter(status.revision) || status.revision < this.state.revision) throw new ApiError('UNAVAILABLE', 503);
+        if (this.queue || this.saving) return; // The save CAS resolves any concurrent edit without overwriting it.
+        const currentRevision = this.state.revision;
+        const budget = await this.api.budget();
+        if (version !== this.version || this.state.phase !== 'ready' || this.queue || this.saving || this.state.revision !== currentRevision) return;
+        if (budget.epoch !== this.state.epoch) throw new ApiError('STALE_EPOCH', 410);
+        if (!validCounter(budget.revision) || budget.revision < currentRevision) throw new ApiError('UNAVAILABLE', 503);
+        this.publish({ revision: budget.revision, ledger: validateLedger(budget.ledger) });
       }
       if (this.state.phase !== 'ready') this.publish({ phase: status.state === 'new' ? 'new' : 'locked', epoch: status.epoch, message: '' });
     } catch (error) { if (version === this.version) this.failure(error); }
   }
   async open(pin: string, create = false) {
+    if (this.locking) await this.locking;
     const version = this.version;
     try {
       const grant = validateGrant(create ? await this.api.setup(pin, this.state.epoch) : await this.api.unlock(pin));
@@ -155,7 +276,11 @@ export class BudgetSession {
     try {
       while (this.queue && this.state.phase === 'ready' && version === this.version) {
         const ledger = this.queue; this.queue = undefined;
-        const result = await this.api.save(this.state.epoch, this.state.revision, ledger);
+        const operation = this.api.save(this.state.epoch, this.state.revision, ledger);
+        this.activeSave = operation;
+        let result: { epoch: number; revision: number };
+        try { result = await operation; }
+        finally { if (this.activeSave === operation) this.activeSave = undefined; }
         if (version !== this.version) return;
         if (!result || result.epoch !== this.state.epoch) throw new ApiError('STALE_EPOCH', 410);
         if (!validCounter(result.revision) || result.revision !== this.state.revision + 1) throw new ApiError('UNAVAILABLE', 503);
@@ -190,13 +315,27 @@ export class BudgetSession {
   }
   async erase() {
     const version = this.version;
-    try { const response = await this.api.erase(this.state.epoch); if (!response || !validCounter(response.epoch)) throw new ApiError('UNAVAILABLE', 503); if (version === this.version) this.clear('erased', 'Your account budget data has been erased.', response.epoch); }
+    try { const response = await this.api.erase(this.state.epoch); if (!response || !validCounter(response.epoch)) throw new ApiError('UNAVAILABLE', 503); if (version === this.version) { this.api.forgetAuthentication(); this.clear('erased', 'Your account and budget have been erased.', response.epoch); } }
     catch (error) { if (version === this.version) this.failure(error); }
   }
   lock = () => {
-    // Best-effort revocation starts with the old grant, then all financial state drops immediately.
-    const revoke = this.api.revoke();
-    this.clear('locked'); void revoke;
+    if (this.locking && this.state.phase !== 'ready') return this.locking;
+    const saving = this.api.finishBeforeLock(this.state.epoch, this.state.revision, this.queue, this.activeSave);
+    this.clear('locked', '', this.state.epoch, true);
+    const version = this.version;
+    this.locking = saving;
+    void saving.then(saved => {
+      if (this.locking === saving) this.locking = undefined;
+      if (!saved && version === this.version) this.publish(this.api.isAuthenticated()
+        ? { message: 'Your last edit could not be confirmed. Unlock to reload the saved budget.' }
+        : { phase: 'signedOut', message: 'Your account session has ended. Sign in again.' });
+    });
+    return saving;
   };
-  dispose() { const revoke = this.api.revoke(); this.clear('signedOut'); this.api.forgetAuthentication(); this.listeners.clear(); void revoke; }
+  dispose() {
+    this.lock();
+    const logout = this.api.logout(this.locking);
+    this.clear('signedOut', '', this.state.epoch, true);
+    this.api.forgetAuthentication(true); this.listeners.clear(); void logout;
+  }
 }

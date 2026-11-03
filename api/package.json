@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "main": "dist/api/src/functions.js",
-  "engines": { "node": ">=22 <25" },
+  "engines": {
+    "node": ">=22 <25"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test test/*.test.mjs",
@@ -13,8 +15,7 @@
   "dependencies": {
     "@azure/cosmos": "^4.9.0",
     "@azure/functions": "^4.8.0",
-    "@azure/identity": "^4.13.0",
-    "jose": "^6.1.0"
+    "@azure/identity": "^4.13.0"
   },
   "devDependencies": {
     "@types/node": "^22.19.0",

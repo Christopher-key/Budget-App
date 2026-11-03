@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/configure.mjs && vite --host 127.0.0.1",
-    "build": "node scripts/configure.mjs && tsc --noEmit && vite build",
+    "build": "node scripts/configure.mjs --production && tsc --noEmit && vite build",
     "test": "tsx --test test/*.test.ts",
     "preview": "vite preview --host 127.0.0.1"
   },

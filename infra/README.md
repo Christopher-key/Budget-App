@@ -1,240 +1,197 @@
-# Optional Azure API infrastructure
+# Azure backend for app-owned accounts and encrypted sync
 
-These files provision the API separately from your **existing Azure Static Web
-App**. The existing GitHub SWA workflow publishes the web client using its existing
-deployment-token secret. This template neither creates nor modifies a Static Web
-App, Entra registration, GitHub secret, or deployment workflow. Nothing has been
-deployed from this workspace.
+Keep the existing Azure Static Web App. These files separately provision a
+Functions API, private host/package storage, and Cosmos database. App users create
+a budget-app username/password; they never need an Azure or Microsoft account.
+No Entra user-flow/app registration is required. Nothing in repository CI creates
+paid resources or publishes the backend automatically.
 
-## Resources and access
+## Resources and permissions
 
-| Resource | Configuration and purpose |
+| Resource | Configuration |
 | --- | --- |
-| Function App and plan | Linux Consumption **Y1**, Functions v4, **Node.js 22**, HTTPS/TLS 1.2, system-assigned managed identity, password-based SCM/FTP publishing disabled. |
-| Host storage | Standard LRS StorageV2; TLS 1.2; HTTPS only; shared-key authentication and public blob access disabled. Identity authenticates host storage and a private `function-packages` deployment container. No Azure Files connection string or SAS. |
-| Cosmos DB for NoSQL | Serverless, one region, Session consistency; no provisioned RU/s, geo-replica, or automatic failover. Local/key authentication is disabled. |
-| Database/container | Default `budget` / `accounts`, partition key **`/ownerId`**. Point reads and atomic same-partition batches; indexing disabled because this repository performs no queries. |
-| Cosmos backups | Periodic backups every four hours; **eight-hour retention**, the minimum supported periodic retention; locally redundant backup storage. No continuous/PITR backup. |
-| Function identity → Cosmos | Custom data-plane role, assigned to this **container only**: `readMetadata` and item `read`, `create`, `replace`, `delete`. Atomic batches use those item permissions; there is no separate transactional-batch role action. No account keys, upsert, query, change feed, stored procedure, database-management, or account-wide data role is granted. |
-| Function identity → storage | **Storage Blob Data Owner** on this host storage account only. This is Microsoft's minimum built-in role for host blob containers/leases, not subscription Owner. No Queue/Table data or Storage Account Contributor role is assigned. |
+| Function App | Linux Consumption Y1, Functions v4, Node.js 22, HTTPS/TLS 1.2, system-assigned managed identity; SCM/FTP password publishing disabled |
+| Host/package storage | Standard LRS StorageV2; private package container; HTTPS/TLS 1.2; shared keys and public blobs disabled |
+| Cosmos DB | NoSQL serverless, one region, Session consistency, local/key auth disabled |
+| Container | `budget` / `accounts` by default; partition `/ownerId`; point reads/atomic same-partition batches, no query indexes; TTL enabled only for items supplying an expiry |
+| Backups | Four-hour periodic backups, eight-hour retention, local redundancy |
+| Function → Cosmos | Custom read-metadata and item read/create/replace/delete role on this container only; no queries, upsert, change feed, stored procedures, or management access |
+| Function → host storage | Blob Data Owner on this host account only, needed for host containers/leases and private package reads; not subscription Owner |
+| Browser → API | One exact supplied HTTPS origin; app-owned Bearer session and additional app-passcode grant; no cookies or wildcard CORS |
 
-The Cosmos role definition's account-level `assignableScopes` says where that role
-may be assigned; its actual role assignment is the single `/dbs/.../colls/...`
-scope. Cosmos RBAC does not isolate individual owner partitions: server-side JWT
-validation and the repository enforce `/ownerId` isolation. The Function identity
-can access all users' records in this container. Adding SDK queries later requires
-a separately reviewed index and permission change.
+The Function can read all users' encrypted records in this dedicated container;
+application authorization enforces owner isolation. Its permissions do not expose
+plaintext financial data or password-derived decryption keys. Cosmos role
+`assignableScopes` is the account, but the actual assignment is the single
+container. An operator with permission to change website/API code or configuration
+has a different and powerful trust boundary; do not give those rights to app
+users or AI tools.
 
-The HTTP-only host does not need queue/blob triggers or Durable Functions roles.
-Optional host diagnostics written to Table Storage are intentionally unavailable;
-the host may report that it cannot persist those diagnostics. See Microsoft's
-[host identity permissions](https://learn.microsoft.com/azure/azure-functions/manage-connections?pivots=functions-auth-identity&tabs=host#grant-permissions-to-an-identity).
-Role assignments can take several minutes to propagate after initial deployment;
-restart the app after permissions and its package are available.
+The endpoints are public HTTPS endpoints protected by authentication, not private
+network endpoints. This template adds no VNet, private endpoints, WAF, or API
+Management tier. App-level persistent throttling is included, but it is not an
+upstream denial-of-service filter or spending cap. No Application Insights,
+request-body capture, diagnostic export, analytics, or external telemetry is
+configured. Azure still handles operational/network metadata.
 
-**The Function, Cosmos, and storage endpoints are public network endpoints.**
-Private blob containers and OAuth protect access; they do not make the network
-private. This template does not provision VNet integration, private endpoints,
-firewall restrictions, a WAF, or an API gateway. CORS allows the one exact supplied
-HTTPS web origin, with credentials disabled. CORS is a browser policy; it provides
-no authentication for native clients or direct HTTP callers. Preview/custom web
-origins need deliberate Entra redirect and CORS updates; wildcards are not used.
+## 1. One-time owner prerequisites
 
-## Register sign-in manually before deployment
+Use your own machine with Azure CLI, its Bicep component, Python 3, Node.js 22,
+and an **existing** subscription/resource group. Choose a region supporting
+Linux Consumption Functions and serverless Cosmos. Verify quota and provider
+registration for Microsoft.Web, Microsoft.Storage, and Microsoft.DocumentDB.
+Sign into Azure as the owner using `az login`; this manages infrastructure and is
+unrelated to users signing into the budget app.
 
-Use one Microsoft Entra workforce tenant or External ID customer tenant appropriate
-for your users. External ID also requires its sign-up/sign-in user flow and client
-association. This code accepts only `login.microsoftonline.com` or a
-`*.ciamlogin.com` authority and the configured tenant's v2 issuer; other identity
-providers/custom authority hosts need a code change.
+Provisioning needs resource creation rights and scoped role-assignment rights at
+the target group. The template does not grant GitHub or a user those rights.
+Later publishing needs Blob Data Contributor on the `function-packages` container
+and Website Contributor on the Function App. Do not grant subscription Owner just
+to publish code. Entra user application registrations and Graph permissions are
+not needed.
 
-1. Register an **API application** in that tenant. Expose Application ID URI
-   `api://<API_APPLICATION_ID_GUID>` and exactly one delegated permission named
-   **`Budget.Access`**. Set the API manifest's
-   `api.requestedAccessTokenVersion` to **2**. For this v2 access token, the `aud`
-   claim and `AUTH_AUDIENCE` are the **API application's GUID**, while the requested
-   scope is `api://<API_APPLICATION_ID_GUID>/Budget.Access`.
-2. Register a separate **SPA public client**. Add the **Single-page application**
-   platform with the exact production redirect, normally
-   `https://<EXISTING_SWA_HOST>/`. The current web callback uses origin plus the
-   current pathname, so register every intended callback path exactly and start
-   sign-in at that path. Add only the API's delegated `Budget.Access` permission
-   and consent/preauthorize it as your tenant policy requires. Remove the default
-   Microsoft Graph `User.Read` permission if added. Do not enable implicit grants,
-   create a client secret, or register it as a confidential web application.
-3. Register a separate **native public client** under **Mobile and desktop
-   applications**. Register the exact native callback URI from the native client's
-   configuration and corresponding iOS URL scheme. If using MSAL's iOS platform
-   configuration, use the actual bundle ID and its generated callback rather than
-   inventing one. Authorize only delegated `Budget.Access`; enable public-client
-   flows if required by that registration. Native sign-in must use the system
-   authentication browser, authorization code and **PKCE S256**, state validation,
-   and no client secret. A registration alone does not add native sign-in code.
-4. Both clients use authorization code with PKCE. Request only the budget API
-   scope; do not add Graph, Mail, Files, or `offline_access`. No mailbox/file access
-   or refresh-token permission is needed. The API never accepts an ID token in
-   place of its access token.
-5. Read the tenant-specific v2 OpenID configuration and copy its exact `issuer`.
-   Use `https://login.microsoftonline.com/<TENANT_ID>/v2.0` for the usual workforce
-   issuer, or the tenant's actual `https://<TENANT_SUBDOMAIN>.ciamlogin.com/<TENANT_ID>/v2.0`
-   issuer for External ID. Use a tenant-specific authority, not `common`,
-   `organizations`, or `consumers`.
+## 2. Generate private deployment parameters
 
-Configure these API settings through the Bicep parameters:
+Create a private directory **outside this repository**. The helper writes two
+independent random 32-byte secrets into a new owner-only file and never prints
+them. It refuses to overwrite an existing file or place it inside the repository.
+Replace the example region, origin, and output path with your actual values:
 
-| Setting | Value |
-| --- | --- |
-| `AUTH_ISSUER` | Exact trusted v2 issuer, without trailing slash. |
-| `AUTH_AUDIENCE` | API application ID GUID. |
-| `AUTH_TENANT_ID` | Trusted tenant ID GUID. |
-| `AUTH_ALLOWED_CLIENT_IDS` | Comma-separated SPA and native application ID GUIDs; each must match an access-token `azp` claim. |
-| `COSMOS_ENDPOINT` | Template-generated HTTPS Cosmos account endpoint. |
-| `DATABASE_NAME`, `CONTAINER_NAME` | Template-generated database/container names. |
+```sh
+python3 infra/create-parameters.py \
+  --output '/absolute/private/path/budget.parameters.json' \
+  --location '<SUPPORTED_AZURE_REGION>' \
+  --frontend-origin 'https://<YOUR_EXISTING_STATIC_WEB_APP_HOST>' \
+  --name-prefix budget \
+  --package-name budget-api-release-001.zip
+```
 
-The API functions use Functions `authLevel: anonymous` because the application
-validates each **Bearer** access token itself: RS256 signature, issuer, API
-audience, expiry, token age/version, tenant, authorized client, and `Budget.Access`
-scope. Anonymous Functions routing does not grant access to budget records. Do
-not substitute SWA identity headers, an API key, a client-provided owner ID, or
-Function keys for that validation. Account ownership derives from the verified
-issuer, tenant and object ID. A PIN is an additional application lock, not the
-Microsoft identity or Cosmos credential.
+Keep this file private and backed up securely. `authLookupKey` and `authPepper`
+are secure ARM parameters supplying `AUTH_LOOKUP_KEY` and `AUTH_PEPPER`. They are
+server-only secrets, not user passwords or budget keys. **Reuse their exact values
+on every redeployment.** Changing the lookup key disconnects accounts; changing
+the pepper invalidates logins. Do not regenerate them to update code.
+`APP_ORIGIN` is set from `frontendOrigin`; Cosmos values are template-generated.
+The server keys are not emitted in template outputs or copied into the API ZIP.
+The example JSON contains placeholders only and must not hold real secrets.
 
-## Review the plan, then deploy manually
+## 3. Review, then provision the backend
 
-Use your own authenticated machine with Azure CLI, its Bicep component, Python 3,
-and an **existing** target resource group. Choose a region that supports both
-Linux Consumption Functions and Cosmos serverless; check subscription quota and
-Microsoft.Web, Microsoft.Storage and Microsoft.DocumentDB provider registration.
-Resource/provider registration and resource-group creation are manual prerequisites.
-The deployer needs resource creation rights (for example Contributor) and scoped
-`Microsoft.Authorization/roleAssignments/write` rights for the storage role (for
-example Role Based Access Control Administrator at the target group). Entra
-application-registration/consent rights are separate. This template grants no
-operator or GitHub principal those privileges.
-
-Copy [params.example.json](params.example.json) to a private local file and replace
-**every** placeholder. It contains identifiers/configuration, never secrets,
-financial records, PINs, database keys, or real user account identifiers. Use a
-3–16 character lowercase `namePrefix`, one exact HTTPS `frontendOrigin` without
-trailing slash, and an immutable ZIP filename such as `budget-api-release-001.zip`.
-
-From the repository root, run the read-only ARM plan first:
+Run the read-only plan first:
 
 ```sh
 ./infra/deploy.sh --subscription '<SUBSCRIPTION_ID>' \
   --resource-group '<EXISTING_RESOURCE_GROUP>' \
-  --parameters '/absolute/path/to/private.parameters.json'
+  --parameters '/absolute/private/path/budget.parameters.json'
 ```
 
-The script defaults to **`az deployment group what-if`**. It neither logs in,
-creates a resource group, publishes code, nor applies a deployment. Review the
-selected subscription, region, resource names, access assignments, public endpoints,
-backup policy, and estimated charges. What-if can fail without necessary read or
-provider permissions and does not prove runtime compatibility. Only this explicit
-flag makes resource changes:
+The script uses ARM what-if and prints resource identifiers/change types only;
+it keeps the full result in an owner-only temporary file and removes it on exit,
+so app-setting values do not appear in its output. Review `main.bicep` for resource
+settings, role scopes, region, public endpoints, and backup policy. What-if does
+not prove live startup or estimate a monthly bill. After reviewing paid resources,
+only this explicit flag applies changes:
 
 ```sh
 ./infra/deploy.sh --subscription '<SUBSCRIPTION_ID>' \
   --resource-group '<EXISTING_RESOURCE_GROUP>' \
-  --parameters '/absolute/path/to/private.parameters.json' --deploy
+  --parameters '/absolute/private/path/budget.parameters.json' --deploy
 ```
 
-No deployment is performed by repository CI. This uses incremental deployment:
-renaming resources/parameters does not migrate data or remove old resources, and
-reapplying settings can restart the Function App. Do not change database/container
-names or `/ownerId` expecting an automatic migration.
+Record the non-secret outputs `functionAppName`, `apiBaseUrl`,
+`hostStorageAccountName`, and package/container names. Deployment is incremental;
+renaming resources does not migrate records or delete abandoned resources. There
+is no automatic migration from the former Entra/plaintext API schema; use a fresh
+dedicated backend container for this release rather than pointing it at old data.
 
-## Publish the API package separately
+## 4. Build and publish API code
 
-The SWA workflow deploys only the browser app. Infrastructure provisioning alone
-does not deploy executable API code. Linux Consumption with identity-based host
-storage uses an **external private ZIP package**, not `WEBSITE_RUN_FROM_PACKAGE=1`
-or a storage-key-dependent remote build. See
-[Microsoft's external-package instructions](https://learn.microsoft.com/azure/azure-functions/deployment-zip-push#run-from-an-external-package-url).
+Provisioning creates infrastructure; it does not install the API package. A new
+Function App may fail startup until its private package and roles are available.
+The Cloud application checks GitHub workflow produces a downloadable
+`budget-api-package` artifact (three-day retention). It contains code and locked
+runtime dependencies, no private parameters or user records. Unzip the artifact
+to obtain `budget-api.zip`, or build locally on Node.js 22:
 
-1. On Linux with Node.js 22, build `api/` using its locked dependencies. Stage only
-   `host.json`, `package.json`, `package-lock.json`, the entire built `dist/` tree,
-   and production `node_modules/`. Run `npm ci --omit=dev` in that staging
-   directory. ZIP **the staging directory's contents**, so `host.json` is at ZIP
-   root and `package.json`'s `main` resolves to `dist/api/src/functions.js`. Keep
-   `.env`, local settings, test fixtures, user records, and development caches out
-   of the ZIP. Build the shared code through `npm --prefix api run build`; its
-   compiled shared files are part of `api/dist/`.
-2. Upload that ZIP to the output storage account's private `function-packages`
-   container under the exact `deploymentPackageBlobName` supplied to the template.
-   Use Entra authentication (`az storage blob upload --auth-mode login`) and an
-   operator granted **Storage Blob Data Contributor on this container**. Do not
-   enable shared keys/public blobs or generate a SAS. The Function's existing
-   account-scoped Blob Data Owner role covers package reads. The template sets
-   `WEBSITE_RUN_FROM_PACKAGE` to this private URL and
-   `WEBSITE_RUN_FROM_PACKAGE_BLOB_MI_RESOURCE_ID=SystemAssigned`.
-3. After upload and role propagation, restart the Function App and sync triggers.
-   An operator with **Website Contributor on this Function App** can perform
-   those operations; no publishing profile is needed. For Azure CLI, use
-   `az functionapp restart` and the ARM
-   `POST <FUNCTION_RESOURCE_ID>/syncfunctiontriggers?api-version=2016-08-01`
-   operation through `az rest`. Pass your subscription explicitly.
-4. For a subsequent release, upload a new immutable package name first, update
-   `deploymentPackageBlobName` in the private parameter file, repeat what-if and
-   explicit deployment, then restart/sync. Keep the previous package for a
-   deliberate rollback. Do not overwrite the live blob. The infrastructure
-   template owns the package URL, so changing it only in the portal will be
-   overwritten on the next template deployment.
+```sh
+npm ci --prefix api
+./infra/package-api.sh /tmp/budget-api-release-001.zip
+```
 
-Before the first package upload, the newly created app can fail startup because
-its package does not yet exist. Infrastructure success is not an API health check.
-Use synthetic records to verify missing/wrong tokens fail, two identities remain
-isolated, atomic writes survive conflicts, and the intended reset succeeds before
-entering real financial information.
+The package helper stages only `host.json`, package metadata, compiled `dist/`,
+and production dependencies. `host.json` is at ZIP root. It uses locked dependency
+versions with install scripts disabled and does not copy `.env`, tests, or local
+development records. Choose a fresh output path; it refuses overwrites.
 
-## Connect the existing frontend
+Use the non-secret deployment outputs to publish to those existing resources:
 
-After provisioning, use the `apiBaseUrl` output as **the Function origin without
-`/api`**; the client adds API paths itself. Configure the existing SWA workflow's
-public settings with the SPA application ID, tenant-specific authority, exact
-`api://<API_APPLICATION_ID_GUID>/Budget.Access` scope, and this API origin as
-documented in [web/.env.example](../web/.env.example). Public identifiers belong
-in runtime/build configuration; no client secret, Cosmos credential, deployment
-token, PIN, or user record belongs there. Keep the existing SWA token secret in
-GitHub. An API deployment is independent of SWA deployment and does not require a
-new SWA resource or token.
+```sh
+./infra/publish-api.sh --subscription '<SUBSCRIPTION_ID>' \
+  --resource-group '<EXISTING_RESOURCE_GROUP>' \
+  --function-app '<FUNCTION_APP_NAME>' \
+  --storage-account '<HOST_STORAGE_ACCOUNT_NAME>' \
+  --blob-name budget-api-release-001.zip \
+  --package /tmp/budget-api-release-001.zip
+```
 
-## Costs, privacy, and production limits
+The script uploads with your Azure CLI identity, refuses to overwrite the release
+blob, points the app at its private package URL, restarts, and syncs triggers. It
+never enables storage keys, generates SAS URLs, retrieves user data, or prints app
+settings. The Function uses its managed identity to read the private ZIP. Initial
+role propagation can take several minutes; retry startup after permissions settle.
+Your owner account must have the scoped publishing permissions noted above.
 
-This is a minimal development/small-workload deployment, not a production privacy
-or availability certification. Functions execution/memory, Cosmos consumed RUs and
-stored data, Blob capacity/operations, backup storage, and outbound traffic can
-cost money. Existing SWA and Entra plans have their own quotas and charges. Free
-allowances are not a spending cap; no budget alert or hard charge limit is created.
-Check current regional prices and set your own Azure budget/alerts before deploying.
+For later releases, change only `deploymentPackageBlobName` in your existing
+private parameter file to a new immutable ZIP name. Build/publish that release,
+and retain the prior package for a deliberate code rollback. The Bicep template
+also owns the package URL, so keep the private parameter filename value aligned
+with the release you publish. Code rollback does not reverse account erasure or
+migrate schemas. Securely delete unneeded old code packages when no longer useful.
 
-Y1 has cold starts and resource/time limits. This application's host timeout is
-one minute. Linux Consumption is scheduled to retire on **30 September 2028**;
-Node.js 22 is its final supported Node major. Plan migration to a supported host
-and Node release before their respective retirement/support deadlines. A single
-Cosmos region and locally redundant backups do not provide regional disaster
-recovery. Cosmos's 2 MB item limit applies to the per-user ledger document; this
-design needs a migration before large histories exceed that limit. This template
-adds no per-account rate limiter or upstream denial-of-service protection.
+## 5. Connect the existing website
 
-No Application Insights, diagnostic-setting export, request-body logging,
-financial analytics, Graph/Mail/Files permissions, or external telemetry sink is
-configured. Host/application error logs should use generic messages only. Azure
-still processes service/operational metadata and provider-controlled diagnostics;
-disabling application telemetry does not eliminate all provider records. Host
-storage contains deployment/runtime artifacts; financial records are in Cosmos.
-Use synthetic data for diagnostics and never log Authorization headers, PINs,
-financial bodies, notes, or JWTs.
+In GitHub repository **Settings → Secrets and variables → Actions → Variables**,
+set only `VITE_API_BASE_URL` to the `apiBaseUrl` output, without `/api` or a trailing
+slash. Then run **Azure Static Web Apps CI/CD** again. The existing SWA deployment
+secret is preserved. There are no frontend Azure client IDs, scopes, user tenant
+registrations, client secrets, database keys, or password values to configure.
+A custom website domain requires the exact `frontendOrigin`/`APP_ORIGIN` to be
+updated deliberately; no wildcard is accepted.
 
-Deleting/resetting a live ledger does **not** immediately erase provider backups,
-existing exports, or independent copies. Periodic snapshots may still contain
-deleted records until Azure expires them under its retention/provider handling;
-eight-hour configured retention is not an instant-erasure guarantee. Review and
-test restore/deletion procedures, authentication policy, abuse controls, capacity,
-and regional recovery requirements before serving real users.
+Before real use, test with invented records: create two accounts, open the same
+account in two browsers, verify cross-account requests fail, save on each device,
+check conflict handling, and confirm the third wrong *app passcode* erases the
+account while wrong account passwords merely throttle. Check browser requests
+contain encrypted financial payloads, not readable amounts, names, or notes.
+Do not upload an existing personal spreadsheet for diagnostics.
 
-Local verification: `main.bicep` compiles with Bicep CLI **0.48.1**; the example JSON
-parses and `bash -n infra/deploy.sh` passes. Azure CLI, ARM what-if, deployment,
-identity propagation, package startup, and live Azure behavior have **not** been
-run or verified in this workspace.
+## Costs and operational limits
+
+Functions execution/memory, Cosmos requests/storage, Blob capacity/operations,
+backup storage, and outbound bandwidth may incur charges. Existing Static Web App
+plans have separate quotas. There is no added per-user Microsoft-login licensing
+requirement, but Azure hosting is not guaranteed free. Check current pricing in
+your chosen region and configure Azure budget alerts. Free allowances and alerts
+are not hard spending limits.
+
+Linux Consumption Y1 has cold starts and resource limits and is scheduled to
+retire on 30 September 2028; Node.js 22 is its final supported Node major. Plan a
+supported host/runtime migration before their respective support deadlines.
+Single-region storage and local backup redundancy do not provide regional disaster
+recovery. Encrypted document size limits require history migration before large
+accounts reach Cosmos's item limit. Abuse protection, review of dependency/code
+changes, backup restoration, deletion metadata, availability, and capacity still
+need owner attention before broad public use.
+
+The native SwiftUI app remains local-only; this release supports the web app in
+Safari and other browsers, not silent native-app synchronization. See
+[security and privacy details](../SECURITY-AND-PRIVACY.md) for encryption, no-AI
+boundaries, forgotten passwords, offline devices, and provider backup limitations.
+
+## Verification status
+
+Local syntax/build/package checks can be run without Azure credentials. The
+repository tests use synthetic accounts only. ARM what-if, paid resource creation,
+managed-identity propagation, package startup, billing, and live Azure access must
+be verified in your subscription; they are not implied by a successful local test
+or Static Web App deployment.

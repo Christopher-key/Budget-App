@@ -12,21 +12,17 @@ param namePrefix string = 'budget'
 @minLength(1)
 param frontendOrigin string
 
-@description('Exact Entra tenant v2 issuer from its OpenID configuration; no trailing slash.')
-@minLength(1)
-param authIssuer string
+@secure()
+@description('Stable random 32-byte base64url account-lookup key. Generate outside the repository; do not rotate without a migration.')
+@minLength(43)
+@maxLength(43)
+param authLookupKey string
 
-@description('API application (client) ID GUID: the aud claim of a v2 access token, not the api:// scope URI.')
-@minLength(1)
-param authAudience string
-
-@description('Entra tenant ID GUID accepted by the API.')
-@minLength(1)
-param authTenantId string
-
-@description('Comma-separated SPA and native public-client application ID GUIDs allowed in access-token azp claims.')
-@minLength(1)
-param authAllowedClientIds string
+@secure()
+@description('Independent random 32-byte base64url password-verifier pepper. Generate outside the repository; do not rotate without a migration.')
+@minLength(43)
+@maxLength(43)
+param authPepper string
 
 @description('Cosmos NoSQL database name. Changing this does not migrate existing records.')
 param databaseName string = 'budget'
@@ -115,6 +111,8 @@ resource container 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/container
     resource: {
       id: containerName
       partitionKey: { paths: ['/ownerId'], kind: 'Hash', version: 2 }
+      // Only rate-limit documents carry a positive per-item TTL. Accounts do not expire.
+      defaultTtl: -1
       // The repository uses point reads and same-partition batches only.
       indexingPolicy: { indexingMode: 'none', automatic: false }
     }
@@ -158,10 +156,9 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'AzureWebJobsStorage__credential', value: 'managedidentity' }
         { name: 'WEBSITE_RUN_FROM_PACKAGE', value: '${storage.properties.primaryEndpoints.blob}${packageContainer.name}/${deploymentPackageBlobName}' }
         { name: 'WEBSITE_RUN_FROM_PACKAGE_BLOB_MI_RESOURCE_ID', value: 'SystemAssigned' }
-        { name: 'AUTH_ISSUER', value: authIssuer }
-        { name: 'AUTH_AUDIENCE', value: authAudience }
-        { name: 'AUTH_TENANT_ID', value: authTenantId }
-        { name: 'AUTH_ALLOWED_CLIENT_IDS', value: authAllowedClientIds }
+        { name: 'AUTH_LOOKUP_KEY', value: authLookupKey }
+        { name: 'AUTH_PEPPER', value: authPepper }
+        { name: 'APP_ORIGIN', value: frontendOrigin }
         { name: 'COSMOS_ENDPOINT', value: cosmos.properties.documentEndpoint }
         { name: 'DATABASE_NAME', value: databaseName }
         { name: 'CONTAINER_NAME', value: containerName }

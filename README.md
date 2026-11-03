@@ -1,15 +1,23 @@
 # Budget App — iPhone source and Azure web app
 
-The web version is in **web/**, with its Azure API in **api/** and shared money/
-Excel logic in **shared/**. The existing Azure Static Web Apps GitHub workflow
-builds and deploys `web/dist`. Follow [Azure deployment instructions](AZURE-DEPLOYMENT.md)
-to view your site first, then configure authenticated cloud sync. Without Azure
-connection settings, the deployed website shows a setup screen and exposes no budgets.
+The web version is in **web/**, with its encrypted-sync API in **api/** and
+shared money/Excel logic in **shared/**. Users create a budget-app username and
+password; no Microsoft or Azure user account is required. Passwords stay in the
+browser, budgets are encrypted before upload, and the server retains salted,
+slow-hashed login verifiers rather than passwords.
 
-The web account's third consecutive wrong app passcode deletes its cloud budget.
-The existing native app remains local-only in this release; native cloud linking
-and its updated deletion policy are paused as requested while website deployment
-is prioritized. No actual financial records or credentials are included.
+The existing Azure Static Web Apps workflow builds and deploys `web/dist`.
+[Deployment instructions](AZURE-DEPLOYMENT.md) explain the separate backend and
+one public API-address setting needed for working accounts and sync. Website
+hosting alone does not deploy the API/database. [Security and privacy
+boundaries](SECURITY-AND-PRIVACY.md) describe encryption, access controls, retained
+metadata, and the limits of excluding AI from externally administered systems.
+
+The web account's third consecutive wrong app passcode erases its active encrypted
+budget, login credentials, wrapped encryption key, and grants. Account-password
+failures are throttled rather than triggering deletion. The native app remains
+local-only in this release and is unchanged; a web login does not silently connect
+existing native records. No real financial records or credentials are included.
 
 SwiftUI source for a personal budget app. This repository contains the app source
 and supporting privacy/verification files, not a complete `.xcodeproj` or an

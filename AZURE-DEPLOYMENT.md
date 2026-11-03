@@ -1,65 +1,76 @@
-# View the website on your existing Azure Static Web App
+# Deploy the budget website and its own account login
 
-Your existing Azure/GitHub link is preserved. Its workflow now installs and builds
-the React app in `web/`, verifies it, and uploads **web/dist**. It no longer tries
-to deploy the Swift source as a website.
+Users create a username and password **inside the budget app**. They do not need
+Microsoft, Azure, or Meta accounts. Azure is the hosting provider behind the app.
+The repository now contains app-account and encrypted-sync code; publishing the
+website alone does not create its API or database.
 
-## View it first
+## What is still needed from the app owner
 
-1. On GitHub, open **Actions → Azure Static Web Apps CI/CD**.
-2. Open the latest run and wait for **Verify and deploy website** to finish.
-3. Open the address in its **Website address** summary, or use **Azure Portal →
-   your Static Web App → Overview → URL**.
+1. Keep your existing Azure Static Web App and GitHub connection.
+2. In your Azure subscription, choose an existing resource group and a region for
+   the backend. Your Azure account is for managing hosting, not for app users.
+3. Follow [the backend deployment steps](infra/README.md) to provision the Functions
+   API, private runtime/package storage, and Cosmos database; publish the API ZIP.
+   These resources may incur charges. Nothing creates them automatically on push.
+4. Set the one public website variable below, then rerun the website workflow.
+5. Test account creation, a second browser, and deletion with invented records.
 
-You do not need to enter passwords or secrets into source files. The workflow
-uses the existing resource-specific Azure deployment token in GitHub Secrets.
-It does not create new Azure resources or deploy the API/database automatically.
+No Entra app registration, OAuth redirect URI, Microsoft sign-in setup, Graph
+permission, or user-facing Azure login is needed. The previous documentation
+link was a developer setup placeholder, not a working account login.
 
-Without the four public settings below, the website deliberately displays an
-Azure connection/setup screen. That is a viewable, successfully deployed site;
-sign-in and cloud budgets remain unavailable until their backend is configured.
-There is no anonymous access to financial records or fake production account.
+## Connect the website to the API
 
-## Enable sign-in and synced budgets afterward
-
-In **GitHub repository → Settings → Secrets and variables → Actions → Variables**,
-add all four public values, then run the website workflow again:
+Open **GitHub → Christopher-key/Budget-App → Settings → Secrets and variables →
+Actions → Variables → New repository variable** and add:
 
 | Variable | Value |
 | --- | --- |
-| `VITE_AZURE_CLIENT_ID` | Public application ID registered for the browser SPA |
-| `VITE_AZURE_AUTHORITY` | Exact Microsoft tenant authority, such as `https://login.microsoftonline.com/TENANT_ID` |
-| `VITE_AZURE_SCOPE` | `api://API_APPLICATION_ID/Budget.Access` |
-| `VITE_API_BASE_URL` | HTTPS Functions origin, such as `https://YOUR-API.azurewebsites.net`; **no `/api` suffix** |
+| `VITE_API_BASE_URL` | Your deployed API origin, for example `https://YOUR-API.azurewebsites.net`, without `/api` or a trailing slash |
 
-These are identifiers and URLs, not client secrets. Configure either all four or
-none. The website uses authorization-code PKCE and requests only its own delegated
-API scope. It does not request Graph, Mail, Files, or persistent refresh access.
+This address is public configuration, not a credential. Never put server keys,
+passwords, account proofs, financial records, or deployment tokens in a `VITE_`
+variable. The old `VITE_AZURE_CLIENT_ID`, `VITE_AZURE_AUTHORITY`, and
+`VITE_AZURE_SCOPE` variables are no longer used and can be removed.
 
-The separately deployed Functions API and Cosmos database must exist before
-sign-in/sync can work. [infra/README.md](infra/README.md) explains public app
-registrations, least-privilege identities, deployment packages, costs, and an
-explicit what-if/deploy process. Review that configuration before creating paid
-resources. The existing Static Web App is sufficient to view the setup screen now.
+Open **Actions → Azure Static Web Apps CI/CD → Run workflow**. When the run
+succeeds, open your website using **Azure Portal → Static Web Apps → your app →
+Overview → URL**, or the workflow's **Website address** summary.
 
-## Privacy and deletion behavior in the web app
+The workflow preserves your existing resource-specific deployment-token secret
+and deploys only `web/dist`. The separate **Cloud application checks** workflow
+tests the backend and produces a `budget-api-package` artifact; it does not deploy
+paid resources or grant GitHub access to your database. Without an API address,
+the website explains that the owner needs to finish setup; it does not send users
+to Microsoft documentation or provide a fake account.
 
-- Strong Microsoft sign-in is required before the app-passcode gate.
-- The server counts consecutive wrong app passcodes across sessions. The third
-  triggers account-budget deletion without a confirmation prompt. Microsoft
-  account password failures are separate and are not available to this app.
-- Budget data, access tokens, and unlock grants remain in browser memory; financial
-  data is not persisted in localStorage, IndexedDB, or a service-worker cache.
-- Financial requests are marked no-store. On locking, account erasure, or a changed
-  deletion epoch, the client clears financial memory and stops stale uploads.
-- The API removes the active ledger and retains a minimal pseudonymous deletion
-  marker to prevent stale clients restoring it. Azure backups and external Excel
-  copies are not instantly erased; retention limits are described in the infra notes.
+## Account security and recovery
 
-The native iPhone cloud-sync bridge is a separate follow-up. This web release does
-not silently connect the existing local-only Swift app to Azure, and its current
-local passcode policy is unchanged. Account-wide deletion applies to connected
-web sessions; do not treat an unlinked iPhone as a connected cloud device.
+- The password stays in the browser. A deliberately slow password derivation
+  produces separate login and encryption keys. The API stores only a salted,
+  slow-hashed, server-peppered login verifier, not the password or raw login proof.
+- Budgets are encrypted in the browser using AES-256-GCM before upload. The
+  random budget key is stored on the server only in password-encrypted form.
+- Account sessions, decrypted records, and usable encryption keys stay in page
+  memory. Reloading or signing out requires another account login. No persistent
+  "remember me" token or financial browser cache is added.
+- The four-digit app passcode is a second gate after account authentication. It
+  does not replace the strong account password or encrypt the cloud budget key.
+- The third consecutive wrong app passcode erases active account credentials,
+  wrapped keys, encrypted budgets, and session grants without confirmation.
+  Wrong public account passwords are rate-limited; they cannot erase an account.
+- There is no email collection, password-reset mailbox, or server key recovery.
+  A forgotten account password cannot recover encrypted budget data. Preserve
+  your password securely outside this app if you need reliable future access.
+
+See [security and privacy details](SECURITY-AND-PRIVACY.md) for access boundaries,
+provider backups, metadata, exported copies, and the limits of excluding AI.
+
+The existing native SwiftUI app is unchanged and remains local-only. The web app
+works in Safari on iPhone and on a computer, but this release does not silently
+sync the separate native app's records. A native encrypted-sync bridge remains a
+separate change.
 
 ## Local verification
 
@@ -72,9 +83,9 @@ npm test --prefix api
 npm ci --prefix web
 npm test --prefix web
 npm run build --prefix web
+./web/node_modules/.bin/tsx --test Verification/cloud-integration.ts
+./infra/package-api.sh /tmp/budget-api-test.zip
 ```
 
-The cloud check workflow runs these checks with synthetic records. They cover
-financial calculations, generated Excel packages, JWT authorization, shared
-passcode failures, deletion races, account isolation, and browser session clearing.
-No real financial records or credentials belong in this repository.
+Use invented records only in test fixtures, screenshots, build artifacts, and
+support requests. Never commit a private deployment parameter file.

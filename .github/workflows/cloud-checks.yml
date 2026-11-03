@@ -23,7 +23,18 @@ jobs:
           node-version: '24'
       - name: Financial models and Excel
         run: npm ci --prefix shared && npm run build --prefix shared && npm test --prefix shared
-      - name: Account isolation and passcode policy
+      - name: App accounts, encrypted sync, and passcode policy
         run: npm ci --prefix api && npm test --prefix api
+      - name: Package deployable API
+        run: ./infra/package-api.sh "$RUNNER_TEMP/budget-api.zip"
+      - name: Keep API package for owner deployment
+        uses: actions/upload-artifact@v4
+        with:
+          name: budget-api-package
+          path: ${{ runner.temp }}/budget-api.zip
+          retention-days: 3
+          if-no-files-found: error
       - name: Website security and production build
         run: npm ci --prefix web && npm test --prefix web && npm run build --prefix web
+      - name: Verify encrypted sync between browser and API
+        run: ./web/node_modules/.bin/tsx --test Verification/cloud-integration.ts

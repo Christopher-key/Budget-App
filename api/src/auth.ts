@@ -1,44 +1,109 @@
-import { createHash } from 'node:crypto';
-import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from 'jose';
-import { ApiError, type Identity } from './types.js';
+import { PASSWORD_ITERATIONS, type AuthParameters, type AuthResponse } from '../../shared/cloud.js';
+import { ApiError, type AccessRecord, type Identity, type Repository } from './types.js';
+import { base64url, cipher, constantEqual, derive, digest, keyedHash, random,
+  requireSession, serverSecret, verifier } from './security.js';
 
-export interface AuthenticationConfig {
-  issuer: string; audience: string; tenantId: string; allowedClientIds: string[];
-}
-const guid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
+export interface AuthenticationConfig { lookupKey: string; pepper: string }
 export function authenticationConfig(environment: NodeJS.ProcessEnv = process.env): AuthenticationConfig {
-  const issuer = environment.AUTH_ISSUER?.replace(/\/$/, '');
-  const audience = environment.AUTH_AUDIENCE;
-  const tenantId = environment.AUTH_TENANT_ID?.toLowerCase();
-  const allowedClientIds = (environment.AUTH_ALLOWED_CLIENT_IDS ?? '').split(',').map(v => v.trim().toLowerCase()).filter(Boolean);
-  if (!issuer || !audience || !tenantId || !guid.test(audience) || !guid.test(tenantId)
-      || !allowedClientIds.length || allowedClientIds.some(v => !guid.test(v))) throw new Error('Invalid authentication configuration');
-  const url = new URL(issuer);
-  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash
-      || !(url.hostname === 'login.microsoftonline.com' || url.hostname.endsWith('.ciamlogin.com'))
-      || url.pathname.toLowerCase() !== `/${tenantId}/v2.0`) throw new Error('Invalid issuer');
-  return { issuer, audience, tenantId, allowedClientIds };
+  return { lookupKey: serverSecret(environment.AUTH_LOOKUP_KEY), pepper: serverSecret(environment.AUTH_PEPPER) };
+}
+function username(value: unknown): string {
+  if (typeof value !== 'string') throw new ApiError(400, 'INVALID_DATA');
+  const normalized = value.trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9._-]{2,63}$/.test(normalized)) throw new ApiError(400, 'INVALID_DATA');
+  return normalized;
+}
+function proof(value: unknown): asserts value is string {
+  if (!base64url(value, 32)) throw new ApiError(400, 'INVALID_DATA');
 }
 
-/** Entra validates the owner. No client-selected account IDs or gateway-header trust. */
-export function authenticator(config: AuthenticationConfig, keyResolver?: JWTVerifyGetKey) {
-  const keys = keyResolver ?? createRemoteJWKSet(new URL(
-    config.issuer.replace(/\/v2\.0$/, '') + '/discovery/v2.0/keys'), { timeoutDuration: 5000 });
-  return async (headers: Pick<Headers, 'get'>): Promise<Identity> => {
-    const match = /^Bearer ([A-Za-z0-9._-]+)$/.exec(headers.get('authorization') ?? '');
-    if (!match) throw new ApiError(401, 'AUTH_REQUIRED');
-    try {
-      const { payload } = await jwtVerify(match[1], keys, {
-        issuer: config.issuer, audience: config.audience, algorithms: ['RS256'], clockTolerance: 5,
-        requiredClaims: ['exp', 'iat', 'oid', 'tid', 'azp', 'scp'], maxTokenAge: '2h',
-      });
-      if (payload.ver !== '2.0' || typeof payload.oid !== 'string' || !guid.test(payload.oid)
-          || typeof payload.tid !== 'string' || payload.tid.toLowerCase() !== config.tenantId
-          || typeof payload.azp !== 'string' || !config.allowedClientIds.includes(payload.azp.toLowerCase())
-          || typeof payload.scp !== 'string' || !payload.scp.split(' ').includes('Budget.Access')) throw new Error('Invalid access');
-      return { ownerId: createHash('sha256')
-        .update(config.issuer + '\0' + payload.tid.toLowerCase() + '\0' + payload.oid.toLowerCase()).digest('base64url') };
-    } catch { throw new ApiError(401, 'AUTH_REQUIRED'); }
-  };
+/** App-owned identity. Never receives passwords or budget decryption keys. */
+export class AuthenticationService {
+  constructor(private readonly repository: Repository, private readonly config: AuthenticationConfig,
+    private readonly now: () => number = Date.now) {}
+  private owner(name: string) { return keyedHash(this.config.lookupKey, 'account', name); }
+  private secret(value: string) { return keyedHash(this.config.pepper, 'proof', value); }
+  private async rate(operation: 'parameters' | 'register' | 'login', name: string, source: string) {
+    const policies = { parameters: [60, 60_000, 120], register: [5, 3_600_000, 10], login: [12, 900_000, 36] };
+    const [accountLimit, window, networkLimit] = policies[operation];
+    const sourceBucket = keyedHash(this.config.lookupKey, 'rate-source-' + operation, source);
+    const accountBucket = keyedHash(this.config.lookupKey, 'rate-account-' + operation, name);
+    if (!await this.repository.consumeRate(sourceBucket, networkLimit, window, this.now()) ||
+        !await this.repository.consumeRate(accountBucket, accountLimit, window, this.now())) throw new ApiError(429, 'RATE_LIMITED');
+    // Also bounds distributed requests with different usernames and source addresses.
+    if (operation !== 'parameters' && !await this.repository.consumeRate('global-auth-work', 120, 60_000, this.now())) {
+      throw new ApiError(429, 'RATE_LIMITED');
+    }
+  }
+  async parameters(input: { username?: unknown }, source = 'unavailable'): Promise<AuthParameters> {
+    const name = username(input.username); await this.rate('parameters', name, source);
+    const ownerId = this.owner(name), snapshot = await this.repository.read(ownerId, false);
+    return { accountId: ownerId, salt: snapshot.access?.credentials?.salt
+      ?? keyedHash(this.config.lookupKey, 'unused-salt', name), iterations: PASSWORD_ITERATIONS };
+  }
+  private issue(access: AccessRecord): { access: AccessRecord; response: AuthResponse } {
+    const secret = random(), token = access.ownerId + '.' + secret;
+    const issuedAt = this.now(), expiresAt = issuedAt + 30 * 60_000;
+    const sessions = (access.sessions ?? []).filter(session => session.expiresAt > issuedAt).slice(-15);
+    sessions.push({ hash: digest(token), issuedAt, expiresAt });
+    return { access: { ...access, sessions, version: access.version + 1 }, response: {
+      token, expiresAt: new Date(expiresAt).toISOString(), accountId: access.ownerId,
+      salt: access.credentials!.salt, wrappedKey: structuredClone(access.credentials!.wrappedKey),
+    } };
+  }
+  async register(input: { username?: unknown; proof?: unknown; salt?: unknown; wrappedKey?: unknown },
+    source = 'unavailable'): Promise<AuthResponse> {
+    const name = username(input.username); proof(input.proof);
+    if (!base64url(input.salt, 32)) throw new ApiError(400, 'INVALID_DATA');
+    const wrappedKey = cipher(input.wrappedKey, true);
+    await this.rate('register', name, source);
+    const ownerId = this.owner(name), saved = await verifier(this.secret(input.proof));
+    for (let retry = 0; retry < 32; retry++) {
+      const snapshot = await this.repository.read(ownerId, false);
+      if (snapshot.access && snapshot.access.state !== 'erased') throw new ApiError(409, 'ACCOUNT_UNAVAILABLE');
+      const access: AccessRecord = { id: 'access', ownerId, state: 'new', epoch: (snapshot.access?.epoch ?? 0) + 1,
+        version: (snapshot.access?.version ?? 0) + 1, revision: 0,
+        credentials: { salt: input.salt, wrappedKey, verifier: saved }, sessions: [] };
+      const issued = this.issue(access);
+      if (await this.repository.commit(ownerId, snapshot.etag, issued.access, undefined)) return issued.response;
+    }
+    throw new ApiError(503, 'UNAVAILABLE');
+  }
+  async login(input: { username?: unknown; proof?: unknown }, source = 'unavailable'): Promise<AuthResponse> {
+    const name = username(input.username); proof(input.proof); await this.rate('login', name, source);
+    const ownerId = this.owner(name), original = await this.repository.read(ownerId, false);
+    // Unknown accounts perform the same memory-hard operation; no fake auth succeeds.
+    const saved = original.access?.credentials?.verifier;
+    const candidate = await derive(this.secret(input.proof), saved?.salt ?? keyedHash(this.config.lookupKey, 'unused-verifier', name));
+    if (!saved || !constantEqual(candidate, saved.hash) || original.access?.state === 'erased') throw new ApiError(401, 'INVALID_LOGIN');
+    for (let retry = 0; retry < 32; retry++) {
+      const snapshot = retry ? await this.repository.read(ownerId, false) : original;
+      const access = snapshot.access;
+      if (!access?.credentials || access.state === 'erased' ||
+          !constantEqual(saved.hash, access.credentials.verifier.hash) ||
+          !constantEqual(saved.salt, access.credentials.verifier.salt)) throw new ApiError(401, 'INVALID_LOGIN');
+      const issued = this.issue(access);
+      if (await this.repository.commit(ownerId, snapshot.etag, issued.access, undefined)) return issued.response;
+    }
+    throw new ApiError(503, 'UNAVAILABLE');
+  }
+  async authenticate(headers: Pick<Headers, 'get'>): Promise<Identity> {
+    const match = /^Bearer ([A-Za-z0-9_-]{43})\.([A-Za-z0-9_-]{43})$/.exec(headers.get('authorization') ?? '');
+    if (!match || !base64url(match[1], 32) || !base64url(match[2], 32)) throw new ApiError(401, 'AUTH_REQUIRED');
+    const ownerId = match[1], sessionHash = digest(match[1] + '.' + match[2]);
+    const { access } = await this.repository.read(ownerId, false);
+    requireSession(access, { ownerId, sessionHash }, this.now());
+    return { ownerId, sessionHash };
+  }
+  async logout(identity: Identity): Promise<void> {
+    for (let retry = 0; retry < 32; retry++) {
+      const snapshot = await this.repository.read(identity.ownerId, false);
+      const access = requireSession(snapshot.access, identity, this.now());
+      const updated = { ...access, version: access.version + 1,
+        sessions: access.sessions!.filter(session => !constantEqual(session.hash, identity.sessionHash)),
+        grants: (access.grants ?? []).filter(grant => !constantEqual(grant.sessionHash, identity.sessionHash)) };
+      if (await this.repository.commit(identity.ownerId, snapshot.etag, updated, undefined)) return;
+    }
+    throw new ApiError(503, 'UNAVAILABLE');
+  }
 }

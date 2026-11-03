@@ -1,4 +1,4 @@
-// Public wire format shared by the browser, Azure API, and native sync bridge.
+// Budget model used on devices. Encrypted cloud wire formats live in cloud.ts.
 // Monetary inputs are decimal STRINGS. No credentials belong in this schema.
 export type PayFrequency = 'monthly' | 'biWeekly' | 'weekly';
 export interface ExpenseEntry { id: string; name: string; amount: string }
@@ -23,7 +23,7 @@ export interface Ledger {
   schemaVersion: 1; months: MonthlyBudget[]; savingsBuckets: SavingsBucket[];
   payFrequency: PayFrequency; exportHistory: ExportAudit[];
 }
-export interface AccountStatus { state: 'new' | 'locked' | 'erased'; epoch: number; accountId: string }
+export interface AccountStatus { state: 'new' | 'locked' | 'erased'; epoch: number; accountId: string; revision?: number }
 export interface UnlockResponse { epoch: number; unlockToken: string; expiresAt: string }
 export interface BudgetEnvelope { epoch: number; revision: number; ledger: Ledger }
 export interface SaveBudgetRequest { epoch: number; revision: number; ledger: Ledger }

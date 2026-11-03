@@ -30,9 +30,6 @@ jobs:
       - name: Build website
         run: npm run build --prefix web
         env:
-          VITE_AZURE_CLIENT_ID: ${{ vars.VITE_AZURE_CLIENT_ID }}
-          VITE_AZURE_AUTHORITY: ${{ vars.VITE_AZURE_AUTHORITY }}
-          VITE_AZURE_SCOPE: ${{ vars.VITE_AZURE_SCOPE }}
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
       - name: Deploy prebuilt website
         id: deployment

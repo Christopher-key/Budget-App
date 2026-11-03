@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 usage() {
-  cat <<'EOF'
+  cat <<'USAGE'
 Usage: infra/deploy.sh --subscription ID --resource-group NAME --parameters FILE [--deploy]
 
-Defaults to Azure ARM what-if. Only --deploy applies the template.
-Use an existing resource group. Review the selected subscription and what-if first.
-EOF
+Defaults to read-only ARM what-if, displaying resource names/change types only.
+Only --deploy creates/changes resources. Use an existing resource group.
+Keep the private parameter file outside this repository; it contains server secrets.
+USAGE
 }
 
 subscription=''
@@ -36,40 +38,68 @@ if [[ -z "$subscription" || -z "$resource_group" || -z "$parameters" ]]; then
 fi
 command -v az >/dev/null || { echo 'Install Azure CLI and its Bicep component first.' >&2; exit 2; }
 command -v python3 >/dev/null || { echo 'Python 3 is required for local parameter validation.' >&2; exit 2; }
-python3 - "$parameters" <<'PY'
-import json, re, sys
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+python3 - "$parameters" "$script_dir/.." <<'PY'
+import base64, json, os, pathlib, re, sys
 from urllib.parse import urlsplit
-with open(sys.argv[1], encoding='utf-8') as f:
-    document = json.load(f)
-parameters = document['parameters']
-values = {name: item['value'] for name, item in parameters.items()}
-required = ['location', 'frontendOrigin', 'authIssuer', 'authAudience', 'authTenantId', 'authAllowedClientIds']
+path = pathlib.Path(sys.argv[1]).resolve()
+repository = pathlib.Path(sys.argv[2]).resolve()
+if path == repository or repository in path.parents:
+    raise SystemExit('Keep the private parameter file outside the repository.')
+if os.name != 'nt' and path.stat().st_mode & 0o077:
+    raise SystemExit('Private parameter file must allow only its owner to read/write it (chmod 600).')
+with path.open(encoding='utf-8') as f:
+    values = {name: item['value'] for name, item in json.load(f)['parameters'].items()}
+required = ['location', 'frontendOrigin', 'authLookupKey', 'authPepper']
 if any(not isinstance(values.get(name), str) or not values[name].strip() for name in required):
-    raise SystemExit('Fill all required non-secret deployment parameters.')
+    raise SystemExit('Fill all required deployment parameters; do not print their values.')
 if any('REPLACE_' in str(value) for value in values.values()):
     raise SystemExit('Replace every example placeholder before running what-if or deployment.')
 origin = values['frontendOrigin']
 url = urlsplit(origin)
 if url.scheme != 'https' or not url.hostname or url.username or url.password or url.path or url.query or url.fragment or '*' in origin or origin != f'https://{url.netloc}':
     raise SystemExit('frontendOrigin must be one exact HTTPS origin, without path or trailing slash.')
-issuer = urlsplit(values['authIssuer'])
-if issuer.scheme != 'https' or not issuer.hostname or issuer.username or issuer.password or issuer.query or issuer.fragment or issuer.port or not (issuer.hostname == 'login.microsoftonline.com' or issuer.hostname.endswith('.ciamlogin.com')) or issuer.path.lower() != f'/{values["authTenantId"].lower()}/v2.0':
-    raise SystemExit('authIssuer must be the configured tenant\'s exact Microsoft HTTPS v2 issuer, without trailing slash.')
-guid = r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
-if any(not re.fullmatch(guid, values[name]) for name in ['authAudience', 'authTenantId']):
-    raise SystemExit('authAudience and authTenantId must be GUIDs.')
-clients = values['authAllowedClientIds'].split(',')
-if not clients or any(not re.fullmatch(guid, value.strip()) for value in clients):
-    raise SystemExit('authAllowedClientIds must be comma-separated public-client application ID GUIDs.')
+for name in ['authLookupKey', 'authPepper']:
+    value = values[name]
+    decoded = base64.urlsafe_b64decode(value + '=') if re.fullmatch(r'[A-Za-z0-9_-]{43}', value) else b''
+    if len(decoded) != 32 or base64.urlsafe_b64encode(decoded).decode().rstrip('=') != value:
+        raise SystemExit('Each server secret must be an independent random 32-byte base64url value.')
+if values['authLookupKey'] == values['authPepper']:
+    raise SystemExit('Use independent server secrets.')
 if not re.fullmatch(r'[a-z][a-z0-9-]{2,15}', values.get('namePrefix', 'budget')):
     raise SystemExit('namePrefix must contain 3–16 lowercase letters, digits, or hyphens, starting with a letter.')
 if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*\.zip', values.get('deploymentPackageBlobName', 'budget-api-initial.zip')):
     raise SystemExit('deploymentPackageBlobName must be a ZIP filename, without a directory or URL.')
 PY
 
-script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-command=(az deployment group)
-if "$deploy"; then command+=(create); else command+=(what-if); fi
-command+=(--subscription "$subscription" --resource-group "$resource_group" --mode Incremental
-  --name budget-backend --template-file "$script_dir/main.bicep" --parameters "@$parameters")
-"${command[@]}"
+# Azure's full what-if payload can include app settings. Keep it in a private
+# temporary file and print only identifiers/change types, never property values.
+result=$(mktemp)
+trap 'rm -f -- "$result"' EXIT
+common=(--subscription "$subscription" --resource-group "$resource_group" --mode Incremental
+  --name budget-backend --template-file "$script_dir/main.bicep" --parameters "@$parameters"
+  --only-show-errors --output json)
+if "$deploy"; then
+  az deployment group create "${common[@]}" > "$result"
+  python3 - "$result" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as f:
+    document = json.load(f)
+print('Deployment state:', document.get('properties', {}).get('provisioningState', 'unknown'))
+for name, entry in document.get('properties', {}).get('outputs', {}).items():
+    # These template outputs are resource identifiers/URLs; never secret parameters.
+    if name in {'functionAppName', 'apiBaseUrl', 'hostStorageAccountName', 'deploymentPackageContainer', 'deploymentPackageBlob'}:
+        print(f'{name}: {entry.get("value", "")}')
+PY
+else
+  az deployment group what-if "${common[@]}" --no-pretty-print > "$result"
+  python3 - "$result" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as f:
+    document = json.load(f)
+for change in document.get('changes', []):
+    print(f'{change.get("changeType", "Unknown")}: {change.get("resourceId", "")}')
+print('Resource summary only. Review main.bicep for access scopes, backup retention, public endpoints, and paid resources.')
+print('No resource changes applied. Repeat with --deploy only after reviewing the configuration and charges.')
+PY
+fi
