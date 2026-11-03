@@ -1,4 +1,15 @@
-# Budget App — offline iPhone source
+# Budget App — iPhone source and Azure web app
+
+The web version is in **web/**, with its Azure API in **api/** and shared money/
+Excel logic in **shared/**. The existing Azure Static Web Apps GitHub workflow
+builds and deploys `web/dist`. Follow [Azure deployment instructions](AZURE-DEPLOYMENT.md)
+to view your site first, then configure authenticated cloud sync. Without Azure
+connection settings, the deployed website shows a setup screen and exposes no budgets.
+
+The web account's third consecutive wrong app passcode deletes its cloud budget.
+The existing native app remains local-only in this release; native cloud linking
+and its updated deletion policy are paused as requested while website deployment
+is prioritized. No actual financial records or credentials are included.
 
 SwiftUI source for a personal budget app. This repository contains the app source
 and supporting privacy/verification files, not a complete `.xcodeproj` or an

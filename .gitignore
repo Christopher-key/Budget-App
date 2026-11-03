@@ -29,3 +29,15 @@ ExcelExports/
 *.p12
 *.p8
 *.mobileprovision
+
+# Generated web/API builds and per-deployment public runtime configuration.
+web/dist/
+api/dist/
+shared/dist/
+web/public/config.json
+web/public/staticwebapp.config.json
+coverage/
+test-results/
+playwright-report/
+*.tsbuildinfo
+local.settings.json

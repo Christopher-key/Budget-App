@@ -1,0 +1,29 @@
+name: Cloud application checks
+
+on:
+  push:
+    branches: [main]
+    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', '.github/workflows/cloud-checks.yml']
+  pull_request:
+    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', '.github/workflows/cloud-checks.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Financial models and Excel
+        run: npm ci --prefix shared && npm run build --prefix shared && npm test --prefix shared
+      - name: Account isolation and passcode policy
+        run: npm ci --prefix api && npm test --prefix api
+      - name: Website security and production build
+        run: npm ci --prefix web && npm test --prefix web && npm run build --prefix web

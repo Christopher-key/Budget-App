@@ -1,0 +1,6 @@
+{
+  "version": "2.0",
+  "logging": { "logLevel": { "default": "Error", "Host.Results": "Error", "Function": "Error" } },
+  "extensions": { "http": { "routePrefix": "api", "maxConcurrentRequests": 32, "maxOutstandingRequests": 64 } },
+  "functionTimeout": "00:01:00"
+}
