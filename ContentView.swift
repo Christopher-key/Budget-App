@@ -883,6 +883,82 @@ func editableMoney(_ value: Decimal) -> String {
     return formatter.string(from: NSDecimalNumber(decimal: value)) ?? ""
 }
 
+enum BudgetForecastError: LocalizedError {
+    case invalidMonth, missingPlan, existingPlan, invalidAmounts
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidMonth: return "Choose one of the next four months."
+        case .missingPlan: return "Enter the current month's Budgeted plan first."
+        case .existingPlan: return "This month already has a plan. Edit its amounts directly."
+        case .invalidAmounts: return "Correct invalid amounts before copying a plan."
+        }
+    }
+}
+
+enum BudgetForecast {
+    static func identifiers(from date: Date = Date()) -> [String] {
+        let parts = BudgetDates.calendar.dateComponents([.year, .month], from: date)
+        guard let year = parts.year, let month = parts.month else { return [] }
+        let base = year * 12 + month - 1
+        return (1...4).compactMap { offset in
+            let value = base + offset, nextYear = value / 12
+            guard (1...9999).contains(nextYear) else { return nil }
+            return String(format: "%04d-%02d", nextYear, value % 12 + 1)
+        }
+    }
+
+    static func blank(id: String, frequency: PayFrequency) throws -> MonthlyBudget {
+        guard let date = BudgetDates.bounds(for: id)?.start else { throw BudgetForecastError.invalidMonth }
+        var month = MonthlyBudget(id: id, date: date)
+        month.paySchedule.frequency = frequency
+        month.periods = (0..<frequency.requiredDateCount).map { _ in PeriodBudget() }
+        return month
+    }
+
+    static func hasPlan(_ month: MonthlyBudget) -> Bool {
+        month.budgetedPlans.contains { plan in
+            ([plan.payroll, plan.extra, plan.savings, plan.savingsWithdrawn]
+             + plan.expenses.map(\.amount)
+             + plan.bucketEntries.flatMap { [$0.contribution, $0.withdrawal] })
+                .contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        }
+    }
+
+    static func copyPlan(from source: MonthlyBudget, to existing: MonthlyBudget?,
+                         id: String, now: Date = Date()) throws -> MonthlyBudget {
+        guard identifiers(from: now).contains(id) else { throw BudgetForecastError.invalidMonth }
+        guard hasPlan(source) else { throw BudgetForecastError.missingPlan }
+        guard source.periods.count == source.paySchedule.frequency.requiredDateCount,
+              existing.map({ $0.periods.count == $0.paySchedule.frequency.requiredDateCount }) ?? true else {
+            throw BudgetForecastError.invalidAmounts
+        }
+        guard !source.budgetedPlans.contains(where: \.hasInvalidAmounts) else { throw BudgetForecastError.invalidAmounts }
+        if let existing = existing, hasPlan(existing) { throw BudgetForecastError.existingPlan }
+        var copied = try blank(id: id, frequency: source.paySchedule.frequency)
+        for index in copied.periods.indices {
+            copied.periods[index].budgeted = source.periods[index].budgeted
+            copied.periods[index].budgeted.expenses = source.periods[index].budgeted.expenses.map {
+                ExpenseEntry(name: $0.name, amount: $0.amount)
+            }
+        }
+        copied.paySchedule.days = source.paySchedule.days.allSatisfy { $0 <= BudgetDates.dayCount(in: id) }
+            ? source.paySchedule.days : []
+        if var target = existing {
+            if copied.periods.count != target.periods.count {
+                let days: [Int] = target.paySchedule.frequency == .monthly ? [1]
+                    : target.paySchedule.frequency == .weekly ? [1, 8, 15, 22] : [1, 15]
+                guard copied.applyPaySchedule(PaySchedule(frequency: target.paySchedule.frequency, days: days)) else {
+                    throw BudgetForecastError.invalidAmounts
+                }
+            }
+            for index in target.periods.indices { target.periods[index].budgeted = copied.periods[index].budgeted }
+            return target
+        }
+        return copied
+    }
+}
+
 final class BudgetStore: ObservableObject {
     @Published var months: [MonthlyBudget] {
         didSet { save() }
@@ -1069,6 +1145,25 @@ final class BudgetStore: ObservableObject {
         currentMonthID = identifier
         isResetting = false
         save()
+        guard defaults.errorMessage == nil else { throw LocalFileError.invalidSettings }
+    }
+
+    func preparePlanningMonth(_ id: String) throws {
+        if months.contains(where: { $0.id == id }) { return }
+        guard id == currentMonthID || BudgetForecast.identifiers().contains(id) else { throw BudgetForecastError.invalidMonth }
+        guard defaults.errorMessage == nil else { throw LocalFileError.invalidSettings }
+        let frequency = months.first(where: { $0.id == currentMonthID })?.paySchedule.frequency ?? .biWeekly
+        months.append(try BudgetForecast.blank(id: id, frequency: frequency))
+        guard defaults.errorMessage == nil else { throw LocalFileError.invalidSettings }
+    }
+
+    func copyCurrentPlanToForecast(_ id: String) throws {
+        guard defaults.errorMessage == nil else { throw LocalFileError.invalidSettings }
+        guard let source = months.first(where: { $0.id == currentMonthID }) else { throw BudgetForecastError.missingPlan }
+        let existing = months.first(where: { $0.id == id })
+        let copied = try BudgetForecast.copyPlan(from: source, to: existing, id: id)
+        if let index = months.firstIndex(where: { $0.id == id }) { months[index] = copied }
+        else { months.append(copied) }
         guard defaults.errorMessage == nil else { throw LocalFileError.invalidSettings }
     }
 
@@ -1401,9 +1496,7 @@ struct BudgetTabs: View {
             .tabItem { Label("Home", systemImage: "house.fill") }
 
             NavigationStack {
-                if let index = store.currentMonthIndex {
-                    BudgetEditorView(month: $store.months[index], savingsBuckets: store.savingsBuckets)
-                }
+                BudgetPlanningView(store: store)
             }
             .tabItem { Label("Budget", systemImage: "pencil.and.list.clipboard") }
 
@@ -1422,6 +1515,87 @@ struct BudgetTabs: View {
             }
             .tabItem { Label("Settings", systemImage: "gearshape.fill") }
         }
+    }
+}
+
+@MainActor
+struct BudgetPlanningView: View {
+    @ObservedObject var store: BudgetStore
+    @State private var selectedMonth = BudgetStore.monthID(for: Date())
+    @State private var message = ""
+
+    private var choices: [String] {
+        Array(Set(store.months.map(\.id) + [store.currentMonthID] + BudgetForecast.identifiers())).sorted(by: >)
+    }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Picker("Budget month", selection: Binding(get: { selectedMonth }, set: choose)) {
+                ForEach(choices, id: \.self) { id in
+                    Text(title(id) + (id > store.currentMonthID ? " · Forecast" : "")).tag(id)
+                }
+            }
+            .padding(.horizontal)
+            DisclosureGroup("Four-month forecast") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Planned amounts for the four months after the current month.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    ForEach(BudgetForecast.identifiers(), id: \.self) { id in forecastRow(id) }
+                }.padding(.top, 8)
+            }.padding(.horizontal)
+            if let index = store.months.firstIndex(where: { $0.id == selectedMonth }) {
+                if selectedMonth > store.currentMonthID {
+                    HStack {
+                        Button("Copy current plan") {
+                            do { try store.copyCurrentPlanToForecast(selectedMonth) }
+                            catch { message = error.localizedDescription }
+                        }
+                        .disabled(BudgetForecast.hasPlan(store.months[index])
+                                  || !store.months.contains(where: { $0.id == store.currentMonthID && BudgetForecast.hasPlan($0) }))
+                        Spacer()
+                        NavigationLink("Pay dates") {
+                            PayScheduleView(month: store.months[index]) { schedule in
+                                store.updatePaySchedule(monthID: selectedMonth, schedule: schedule)
+                            }
+                        }
+                    }.padding(.horizontal)
+                }
+                BudgetEditorView(month: $store.months[index], savingsBuckets: store.savingsBuckets)
+                    .id(selectedMonth)
+            }
+        }
+        .navigationTitle("Budget")
+        .onAppear { if !choices.contains(selectedMonth) { selectedMonth = store.currentMonthID } }
+        .alert("Budget plan", isPresented: Binding(get: { !message.isEmpty }, set: { if !$0 { message = "" } })) {
+            Button("OK", role: .cancel) { message = "" }
+        } message: { Text(message) }
+    }
+
+    private func choose(_ id: String) {
+        do { try store.preparePlanningMonth(id); selectedMonth = id }
+        catch { message = error.localizedDescription }
+    }
+
+    private func title(_ id: String) -> String {
+        BudgetDates.bounds(for: id)?.start.formatted(.dateTime.month(.wide).year()) ?? id
+    }
+
+    private func forecastRow(_ id: String) -> some View {
+        Button { choose(id) } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title(id)).font(.subheadline.weight(.semibold))
+                if let month = store.months.first(where: { $0.id == id }), BudgetForecast.hasPlan(month) {
+                    if month.budgetedSummary.hasInvalidAmounts { Text("Check planned amounts").foregroundStyle(.red) }
+                    else {
+                        HStack {
+                            Text("Planned remaining").foregroundStyle(.secondary)
+                            Spacer()
+                            Text(month.budgetedSummary.remaining, format: .currency(code: "USD"))
+                        }.font(.caption)
+                    }
+                } else { Text("Not planned").font(.caption).foregroundStyle(.secondary) }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }.buttonStyle(.plain)
     }
 }
 
@@ -1722,6 +1896,7 @@ struct BudgetEditorView: View {
     @Binding var month: MonthlyBudget
     let savingsBuckets: [SavingsBucket]
     @State private var selectedPeriod = 0
+    private var isForecast: Bool { month.id > BudgetStore.monthID(for: Date()) }
 
     var body: some View {
         ScrollView {
@@ -1729,7 +1904,7 @@ struct BudgetEditorView: View {
                 Text(month.title)
                     .font(.title2.bold())
 
-                Text("Choose a budget section. Changes save automatically on this device.")
+                Text(isForecast ? "Plan expected income, expenses and savings for this future month. Changes save automatically on this device." : "Choose a budget section. Changes save automatically on this device.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
@@ -1753,10 +1928,12 @@ struct BudgetEditorView: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
-                    BudgetInputCard(title: "Realistic", plan: $month.periods[selectedPeriod].realistic,
-                                    color: .blue, reportedTransactions: month.transactions(in: window),
-                                    savingsBuckets: savingsBuckets)
-                        .id("\(month.id)-\(selectedPeriod)-\(window.startDay)-\(window.endDay)-realistic")
+                    if !isForecast {
+                        BudgetInputCard(title: "Realistic", plan: $month.periods[selectedPeriod].realistic,
+                                        color: .blue, reportedTransactions: month.transactions(in: window),
+                                        savingsBuckets: savingsBuckets)
+                            .id("\(month.id)-\(selectedPeriod)-\(window.startDay)-\(window.endDay)-realistic")
+                    }
                     BudgetInputCard(title: "Budgeted", plan: $month.periods[selectedPeriod].budgeted,
                                     color: .green, savingsBuckets: savingsBuckets)
                         .id("\(month.id)-\(selectedPeriod)-\(window.startDay)-\(window.endDay)-budgeted")
@@ -2459,7 +2636,7 @@ struct TrendsView: View {
                     }
                     .padding(.vertical)
                 } else {
-                    ForEach(months.sorted { $0.id > $1.id }) { month in
+                    ForEach(months.filter { $0.id <= currentMonthID }.sorted { $0.id > $1.id }) { month in
                         let realistic = month.realisticSummary
                         NavigationLink {
                             ScrollView {

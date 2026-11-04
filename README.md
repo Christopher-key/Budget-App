@@ -105,6 +105,21 @@ archiving, accounting, and export scope.
 
 ## Pay dates and budget sections
 
+Budget now includes a **four-month forecast** for the four calendar months after
+the current month, including year changes. Choose a future month to enter its
+Budgeted income, expenses and savings, or copy the current Budgeted plan into an
+empty forecast. An existing plan, including an explicit zero, is not overwritten.
+Future Realistic amounts and transactions are not copied or fabricated. Home
+continues to show the current pay period; web monthly history excludes future
+forecasts. Planned savings do not increase recorded savings-bucket balances.
+
+Each future month has its own pay schedule. Pay dates that do not exist in a
+shorter destination month are cleared for explicit selection. Copies into an
+existing month preserve that month's schedule and actual records; changing
+period counts combines or expands copied planned sections without dropping
+monthly amounts. Forecast records use the existing encrypted web ledger schema;
+the local iPhone edition stores them with its existing protected local records.
+
 In the app, open Settings → Pay schedule. Choose a type, select exactly the
 required number of distinct dates on the calendar, and tap Save.
 
