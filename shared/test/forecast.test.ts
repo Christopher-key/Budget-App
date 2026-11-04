@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { copyCurrentPlanToForecast, forecastMonthIds, forecastSummary, planningMonth, savePlanningMonth } from '../forecast.js';
-import { bucketBalances, emptyLedger, monthSummary, newMonth } from '../model.js';
+import { bucketBalances, emptyLedger, monthSummary, newMonth, validateLedger } from '../model.js';
 
 const now = new Date(2026, 10, 3, 12);
 function fixture() {
@@ -101,6 +101,47 @@ test('only an edited forecast is saved, and new months beyond the four-month win
   assert.throws(() => savePlanningMonth(ledger, newMonth('2027-04'), now));
   assert.throws(() => copyCurrentPlanToForecast(ledger, '2027-04', now));
   assert.equal(ledger.months.length, 1);
+});
+
+test('forecast amount entry preserves each keystroke without inserting a decimal or moving neighboring values', () => {
+  let ledger = fixture();
+  const original = structuredClone(ledger), id = '2026-12';
+  for (const text of ['3', '30', '300', '30', '3', '', '3', '3.', '3.0', '3.05']) {
+    const month = planningMonth(ledger, id, now);
+    month.periods[0].budgeted.expenses[1].amount = text;
+    ledger = savePlanningMonth(ledger, month, now);
+    const saved = ledger.months.find(month => month.id === id)!;
+    assert.equal(saved.periods[0].budgeted.expenses[1].amount, text);
+    assert.equal(saved.periods[0].budgeted.expenses[0].amount, '');
+    assert.deepEqual(ledger.months[0], original.months[0]);
+  }
+  assert.equal(monthSummary(ledger.months[1], 'budgeted').expenses, 305n);
+  assert.equal(validateLedger(ledger).months[1].periods[0].budgeted.expenses[1].amount, '3.05');
+});
+
+test('plan editing preserves income and savings drafts while the storage validator still normalizes money', () => {
+  const ledger = fixture(), month = planningMonth(ledger, '2026-12', now);
+  const bucket = { id: crypto.randomUUID(), name: 'Synthetic goal', target: '500', isActive: true };
+  ledger.savingsBuckets.push(bucket);
+  month.periods[0].budgeted = { ...month.periods[0].budgeted,
+    payroll: '300', extra: '30.', savings: '3.0', savingsWithdrawn: '0',
+    bucketEntries: [{ id: bucket.id, name: bucket.name, contribution: '25', withdrawal: '.5' }] };
+  const saved = savePlanningMonth(ledger, month, now), plan = saved.months[1].periods[0].budgeted;
+  assert.equal(plan.payroll, '300');
+  assert.equal(plan.extra, '30.');
+  assert.equal(plan.savings, '3.0');
+  assert.equal(plan.savingsWithdrawn, '0');
+  assert.equal(plan.bucketEntries[0].contribution, '25');
+  assert.equal(plan.bucketEntries[0].withdrawal, '.5');
+  const stored = validateLedger(saved).months[1].periods[0].budgeted;
+  assert.equal(stored.payroll, '300.00');
+  assert.equal(stored.extra, '30.00');
+  assert.equal(stored.savings, '3.00');
+  assert.equal(stored.bucketEntries[0].withdrawal, '0.50');
+  const invalid = structuredClone(month);
+  invalid.periods[0].budgeted.payroll = '3.005';
+  assert.throws(() => savePlanningMonth(saved, invalid, now));
+  assert.equal(saved.months[1].periods[0].budgeted.payroll, '300');
 });
 
 test('forecast summaries use planned amounts and never present realistic spending as a prediction', () => {

@@ -25,7 +25,11 @@ export function savePlanningMonth(ledger: Ledger, month: MonthlyBudget, now = ne
     if (![monthId(now), ...forecastMonthIds(now)].includes(month.id)) throw new Error('Choose one of the next four months.');
     result.months.push(structuredClone(month));
   } else result.months[index] = structuredClone(month);
-  return validateLedger(result);
+  // Check the complete ledger without replacing an in-progress entry such as
+  // "3" or "3." with "3.00" after each keystroke. Encryption normalizes the
+  // persisted representation separately.
+  validateLedger(result);
+  return result;
 }
 
 function hasInput(plan: BudgetPlan): boolean {

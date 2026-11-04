@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { BudgetPlan, Ledger, MonthlyBudget, PayFrequency, ReportedExpense, SavingsBucket } from '../../shared/contracts.js';
 import { applySchedule, bucketBalances, categoryWarnings, emptyPlan, expenseCategories, formatMoney, monthId, monthSummary, moneyText, newMonth, parseMoney, summary, transactionsIn, validateLedger, windows } from '../../shared/model.js';
@@ -89,7 +89,8 @@ function Budget({ ledger, update }: { ledger: Ledger; update: (l: Ledger) => voi
   const [selectedMonth, selectMonth] = useState(monthId()), [error, setError] = useState("");
   const choices = [...new Set([...ledger.months.map(month => month.id), monthId(), ...forecastMonthIds()])].sort((a, b) => b.localeCompare(a));
   const selectedID = choices.includes(selectedMonth) ? selectedMonth : monthId();
-  const month = planningMonth(ledger, selectedID), all = windows(month), day = new Date().getDate();
+  const month = useMemo(() => planningMonth(ledger, selectedID), [ledger, selectedID]);
+  const all = windows(month), day = new Date().getDate();
   const [selected, select] = useState(() => all.find(w => w.startDay <= day && w.endDay >= day)?.index ?? 0);
   const window = all[selected] ?? all[0], period = month.periods[window.index], isFuture = month.id > monthId();
   const choose = (id: string) => { selectMonth(id); select(0); setError(""); };
