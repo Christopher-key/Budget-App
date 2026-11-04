@@ -50,6 +50,7 @@ def operation_label(arguments):
         ('role', 'assignment', 'create'): 'assign a scoped operator role',
         ('role', 'definition', 'list'): 'read a security role definition',
         ('functionapp', 'config', 'appsettings', 'set'): 'enable the budget security gate',
+        ('rest',): 'synchronize the API routes',
     }
     return next((label for prefix, label in labels.items() if arguments[:len(prefix)] == list(prefix)),
                 'complete an Azure operation')
@@ -265,15 +266,43 @@ def publisher_access(args, data, control):
         assign_role(args, data['operator'], definitions[0], scope)
 
 
-def publish(args, function, storage, blob, package):
+def publish(args, function, storage, blob, package, *, stage_only=False):
+    command = ['bash', str(ROOT / 'infra/publish-api.sh'), '--subscription', args.subscription,
+               '--resource-group', args.resource_group, '--function-app', function,
+               '--storage-account', storage, '--blob-name', blob, '--package', str(package)]
+    if stage_only:
+        command.append('--stage-only')
     try:
-        result = subprocess.run(['bash', str(ROOT / 'infra/publish-api.sh'), '--subscription', args.subscription,
-                                 '--resource-group', args.resource_group, '--function-app', function,
-                                 '--storage-account', storage, '--blob-name', blob, '--package', str(package)],
-                                timeout=300, check=False)
+        result = subprocess.run(command, timeout=300, check=False)
     except (OSError, subprocess.TimeoutExpired):
         raise ActivationError('Code publication did not finish. Retry using the same immutable release.') from None
     require(result.returncode == 0, 'Code publication failed. Review the publisher message; do not disable the security gate.')
+
+
+def synchronize_routes(args, resource_id, *, attempts=12):
+    """Called only after the new API is explicitly started under the locked gate."""
+    for attempt in range(attempts):
+        try:
+            az(['rest', '--method', 'post', '--url',
+                'https://management.azure.com' + resource_id + '/syncfunctiontriggers?api-version=2016-08-01',
+                '--output', 'none'])
+            return
+        except ActivationError as error:
+            # An ARM authorization denial needs scoped permission review. A
+            # nested host/runtime Forbidden can instead mean a cold or stopped
+            # host, so don't prescribe broader roles based on the word alone.
+            if any('(' + code + ')' in str(error) for code in
+                   ['AuthorizationFailed', 'AuthorizationPermissionMismatch', 'AuthenticationFailed',
+                    'InvalidAuthenticationToken', 'InvalidAuthenticationTokenTenant', 'ExpiredAuthenticationToken',
+                    'CLI_ARGUMENT_ERROR', 'LOGIN_REQUIRED']):
+                raise
+            if attempt + 1 == attempts:
+                raise ActivationError('API route synchronization did not become ready after starting the locked host. '
+                                      'The API will be stopped again. Check host startup and scoped permissions; '
+                                      'a host-runtime Forbidden is not proof of missing Azure roles. '
+                                      f'Last safe error: {error}') from None
+            print('Waiting for the locked Function host to synchronize API routes...', flush=True)
+            time.sleep(5)
 
 
 def response_json(url, *, origin=None, body=None):
@@ -314,7 +343,7 @@ def initial_locked(state):
             and not state['handledAlertHashes'])
 
 
-def commission(control, *, configure_gate, publish_budget, verify_status, verify_locked, verify_open):
+def commission(control, *, configure_gate, publish_budget, synchronize_budget, verify_status, verify_locked, verify_open):
     current, etag = control.read()
     if current is None:
         control.write(CONTROL.transition(None, 'lock'), None)
@@ -328,6 +357,13 @@ def commission(control, *, configure_gate, publish_budget, verify_status, verify
         control.power('stop')
         configure_gate()
         publish_budget()
+        # Publishing only stages the immutable code; a restart is not a start.
+        # Refuse to start if an incident or operator changed the control first.
+        before_start, before_etag = control.read()
+        require(before_start == current and before_etag == etag and initial_locked(before_start),
+                'Control changed during code staging. Activation will not start the API.')
+        control.power('start')
+        synchronize_budget()
         require(verify_locked(), 'New API code did not verify the locked gate. Keep the API stopped.')
         require(verify_status('locked', 1), 'The controller changed while commissioning; keep the API stopped.')
         latest, latest_etag = control.read()
@@ -336,7 +372,6 @@ def commission(control, *, configure_gate, publish_budget, verify_status, verify
         own_open = {**latest, 'locked': False, 'generation': 2, 'reason': 'initialization', 'review': 'none',
                     'incidentId': None, 'updatedAt': datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')}
         control.write(CONTROL.valid_state(own_open), etag)
-        control.power('start')
         require(verify_status('open', 2) and verify_open(), 'Commissioning did not verify open service with the gate enabled.')
         after, _ = control.read()
         require(after == own_open, 'A security change interrupted commissioning. The API must remain stopped.')
@@ -403,7 +438,8 @@ def main():
             return wait_for(lambda: response_json('https://' + data['hostname'] + '/api/auth/parameters', origin=data['frontend'], body={'username': ''})
                             == (status, {'code': code}), 'budget API ' + code)
         commission(control, configure_gate=configure_gate,
-                   publish_budget=lambda: publish(args, data['functionApp'], data['storage'], 'budget-api-security-' + short_sha + '.zip', package),
+                   publish_budget=lambda: publish(args, data['functionApp'], data['storage'], 'budget-api-security-' + short_sha + '.zip', package, stage_only=True),
+                   synchronize_budget=lambda: synchronize_routes(args, data['id']),
                    verify_status=status_matches, verify_locked=lambda: api_matches('SERVICE_LOCKED', 503),
                    verify_open=lambda: api_matches('INVALID_DATA', 400))
         print('Budget API lockdown gate enabled; service is OPEN. No user account or financial record was read or changed.')

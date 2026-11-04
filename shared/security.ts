@@ -1,6 +1,6 @@
 // Public service status contains no incident details, identities or budget data.
-export const LOCKDOWN_MESSAGE = 'Access is temporarily paused while we review a security alert. This lockdown does not erase your budget records.';
-export const SECURITY_UNAVAILABLE_MESSAGE = 'Access is temporarily paused because the service security status could not be verified.';
+export const LOCKDOWN_MESSAGE = 'The service is temporarily unavailable. Please try again later.';
+export const SECURITY_UNAVAILABLE_MESSAGE = 'The service is temporarily unavailable. Please try again later.';
 export interface PublicServiceStatus {
   schemaVersion: 1;
   state: 'open' | 'locked' | 'unavailable';

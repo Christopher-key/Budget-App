@@ -80,6 +80,10 @@ elif args[:1] == ['rest']:
     assert option('--url') == 'https://management.azure.com/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/synthetic-group/providers/Microsoft.Web/sites/synthetic-app/syncfunctiontriggers?api-version=2016-08-01'
     assert option('--output') == 'none'
     marker = root / 'sync-failed'
+    if mode == 'sync-host-forbidden':
+        fail('BadRequest: Encountered Forbidden (403) from the host runtime. Bearer synthetic-sensitive-token')
+    if mode == 'sync-authorization-failed':
+        fail('AuthorizationFailed Bearer synthetic-sensitive-token')
     if mode == 'sync-once' and not marker.exists():
         marker.write_text('yes')
         fail('ServiceUnavailable synthetic-sensitive-token')
@@ -149,7 +153,7 @@ class PublisherTests(unittest.TestCase):
         path = self.state / 'calls.jsonl'
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
-    def run_publisher(self, package=None, mode=None):
+    def run_publisher(self, package=None, mode=None, extra=None):
         if mode:
             (self.state / 'mode').write_text(mode)
         env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ['PATH'], FAKE_AZ_STATE=str(self.state))
@@ -158,7 +162,7 @@ class PublisherTests(unittest.TestCase):
             '--resource-group', 'synthetic-group', '--function-app', 'synthetic-app',
             '--storage-account', 'syntheticstore', '--blob-name', 'release-001.zip',
             '--package', str(package or self.package),
-        ], env=env, capture_output=True, text=True, timeout=15)
+        ] + (extra or []), env=env, capture_output=True, text=True, timeout=15)
 
     def run_github_publisher(self, *, mode='normal', release=None, extra=None, deployment=None, blob=None):
         (self.state / 'mode').write_text(mode)
@@ -239,6 +243,47 @@ class PublisherTests(unittest.TestCase):
         self.assertIn('Existing release matches', result.stdout)
         self.assertFalse(any(call[:3] == ['storage', 'blob', 'upload'] for call in self.calls()))
         self.assertTrue(any(call[:3] == ['storage', 'blob', 'download'] for call in self.calls()))
+
+    def test_stage_only_updates_verified_package_without_start_restart_sync_or_host_lookup(self):
+        result = self.run_publisher(extra=['--stage-only'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('API package staged; Function App was not started or restarted.', result.stdout)
+        self.assertNotIn('API package published.', result.stdout)
+        self.assertEqual((self.state / 'remote.zip').read_bytes(), self.package.read_bytes())
+        calls = self.calls()
+        self.assertTrue(any(call[:4] == ['functionapp', 'config', 'appsettings', 'set'] for call in calls))
+        self.assertFalse(any(call[:2] in [['functionapp', 'start'], ['functionapp', 'restart'], ['functionapp', 'show']]
+                             or call[:1] == ['rest'] for call in calls))
+
+    def test_stage_only_still_verifies_matching_existing_bytes_and_rejects_different_code(self):
+        (self.state / 'remote.zip').write_bytes(self.package.read_bytes())
+        result = self.run_publisher(extra=['--stage-only'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Existing release matches', result.stdout)
+        self.assertTrue(any(call[:3] == ['storage', 'blob', 'download'] for call in self.calls()))
+        (self.state / 'calls.jsonl').unlink()
+        (self.state / 'remote.zip').write_bytes(b'Different synthetic code')
+        refused = self.run_publisher(extra=['--stage-only'])
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn('already contains different code', refused.stderr)
+        self.assert_no_function_mutation()
+
+    def test_host_runtime_forbidden_does_not_prescribe_broader_roles_or_leak_diagnostics(self):
+        result = self.run_publisher(mode='sync-host-forbidden')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('synchronize API routes', result.stderr)
+        self.assertIn('host may be stopped', result.stderr)
+        self.assertNotIn('Azure denied permission', result.stderr)
+        self.assertNotIn('Website Contributor', result.stderr)
+        self.assertNotIn('synthetic-sensitive-token', result.stdout + result.stderr)
+
+    def test_explicit_sync_authorization_failure_still_reports_scoped_access_requirement(self):
+        result = self.run_publisher(mode='sync-authorization-failed')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Azure denied permission to synchronize API routes', result.stderr)
+        self.assertIn('Website Contributor', result.stderr)
+        self.assertIn('Azure error code: AuthorizationFailed', result.stderr)
+        self.assertNotIn('synthetic-sensitive-token', result.stdout + result.stderr)
 
     def test_different_existing_bytes_are_not_overwritten_or_activated(self):
         original = b'a different synthetic deployed package'

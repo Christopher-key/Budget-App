@@ -36,13 +36,23 @@ during read-only metadata checks, before resource changes.
 The activator verifies the GitHub ZIP/checksum before Azure changes, provisions
 the separate controller/storage on the existing plan, creates an initial locked
 control record with create-only semantics, and verifies the controller before
-stopping the budget API. It then enables the gate while the API is stopped,
-publishes the new code, and checks the locked response. **Only an unchanged first
+stopping the budget API. It then enables the gate while the API is stopped and
+stages the new code without a publisher restart or route sync. After checking
+that control state is unchanged, it explicitly starts the API with the gate still
+locked, synchronizes routes, and verifies the locked response. **Only an unchanged first
 initialization** can be commissioned open. This records initialization rather
 than labeling maintenance a false security alert. Existing incidents, confirmed
 initializations and previously commissioned records are never automatically
 reopened. A failure after stopping the API requests another stop; inspect control
 state before resuming. Do not disable the gate as a startup workaround.
+
+A generic `Forbidden` from route synchronization can come from a stopped or
+starting Function host; it does not establish that Azure roles are missing. The
+activator retries host startup failures while keeping the gate locked. An explicit
+ARM authorization error instead stops immediately for scoped-permission review.
+An earlier failure before the initial open step can be retried from a fresh
+checkout using the same checked release and immutable package names; the script
+still refuses to reopen a real incident or an already commissioned record.
 
 Commissioning briefly interrupts API access and invalidates earlier sessions.
 It does not read or change financial records or regenerate account keys. New

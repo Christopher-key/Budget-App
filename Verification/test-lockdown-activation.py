@@ -18,6 +18,7 @@ class FakeControl:
         self.state = deepcopy(state)
         self.version = 1
         self.events = []
+        self.start_states = []
 
     def read(self):
         self.events.append('read')
@@ -32,6 +33,8 @@ class FakeControl:
 
     def power(self, action):
         self.events.append(action)
+        if action == 'start':
+            self.start_states.append(deepcopy(self.state))
 
 
 class ActivationTests(unittest.TestCase):
@@ -138,7 +141,8 @@ class ActivationTests(unittest.TestCase):
     def run_commission(self, control, **overrides):
         callbacks = {
             'configure_gate': lambda: control.events.append('gate-on'),
-            'publish_budget': lambda: control.events.append('publish-restart'),
+            'publish_budget': lambda: control.events.append('stage-package'),
+            'synchronize_budget': lambda: control.events.append('sync-routes'),
             'verify_status': lambda state, generation: control.state['locked'] == (state == 'locked') and control.state['generation'] == generation,
             'verify_locked': lambda: control.events.append('verify-locked') or True,
             'verify_open': lambda: control.events.append('verify-open') or True,
@@ -146,7 +150,7 @@ class ActivationTests(unittest.TestCase):
         callbacks.update(overrides)
         return activation.commission(control, **callbacks)
 
-    def test_fresh_activation_sets_gate_before_publisher_restart_and_opens_only_after_verification(self):
+    def test_fresh_activation_stages_then_starts_locked_before_synchronization_and_open(self):
         control = FakeControl()
         self.run_commission(control)
         self.assertEqual(control.state['generation'], 2)
@@ -157,9 +161,57 @@ class ActivationTests(unittest.TestCase):
         events = control.events
         self.assertLess(events.index('write-locked'), events.index('stop'))
         self.assertLess(events.index('stop'), events.index('gate-on'))
-        self.assertLess(events.index('gate-on'), events.index('publish-restart'))
+        self.assertLess(events.index('gate-on'), events.index('stage-package'))
         self.assertLess(events.index('verify-locked'), events.index('write-open'))
-        self.assertLess(events.index('write-open'), events.index('start'))
+        self.assertLess(events.index('stage-package'), events.index('start'))
+        self.assertLess(events.index('start'), events.index('sync-routes'))
+        self.assertLess(events.index('sync-routes'), events.index('verify-locked'))
+        self.assertEqual(len(control.start_states), 1)
+        self.assertTrue(control.start_states[0]['locked'])
+        self.assertEqual(control.start_states[0]['generation'], 1)
+
+    def test_staging_requests_no_publisher_restart_or_sync(self):
+        args = Namespace(subscription='11111111-2222-3333-4444-555555555555', resource_group='synthetic-group')
+        with patch.object(activation.subprocess, 'run', return_value=Namespace(returncode=0)) as process:
+            activation.publish(args, 'synthetic-api', 'syntheticstore', 'synthetic.zip', Path('/synthetic/code.zip'), stage_only=True)
+        self.assertIn('--stage-only', process.call_args.args[0])
+
+    def test_route_sync_retries_host_startup_without_requesting_more_privileges(self):
+        args = Namespace()
+        with patch.object(activation, 'az', side_effect=[activation.ActivationError('Azure host startup (UNCLASSIFIED)'), None]) as azure, \
+                patch.object(activation.time, 'sleep') as pause:
+            activation.synchronize_routes(args, '/subscriptions/synthetic/providers/Microsoft.Web/sites/synthetic-api', attempts=2)
+        self.assertEqual(azure.call_count, 2)
+        self.assertEqual(pause.call_count, 1)
+        self.assertTrue(all(call.args[0][0] == 'rest' for call in azure.call_args_list))
+
+    def test_real_route_sync_authorization_failure_is_not_retried_as_startup(self):
+        with patch.object(activation, 'az', side_effect=activation.ActivationError('Azure operation (AuthorizationFailed)')) as azure, \
+                patch.object(activation.time, 'sleep') as pause:
+            with self.assertRaisesRegex(activation.ActivationError, 'AuthorizationFailed'):
+                activation.synchronize_routes(Namespace(), '/subscriptions/synthetic/providers/Microsoft.Web/sites/synthetic-api')
+        self.assertEqual(azure.call_count, 1)
+        pause.assert_not_called()
+
+    def test_route_sync_startup_retry_is_bounded_and_retains_safe_error_category(self):
+        with patch.object(activation, 'az', side_effect=activation.ActivationError('Azure could not synchronize routes (BadRequest).')) as azure, \
+                patch.object(activation.time, 'sleep') as pause:
+            with self.assertRaisesRegex(activation.ActivationError, 'BadRequest'):
+                activation.synchronize_routes(Namespace(), '/subscriptions/synthetic/providers/Microsoft.Web/sites/synthetic-api', attempts=2)
+        self.assertEqual(azure.call_count, 2)
+        self.assertEqual(pause.call_count, 1)
+
+    def test_route_sync_failure_after_locked_start_never_opens_and_stops_api(self):
+        control = FakeControl()
+        def fail():
+            control.events.append('sync-routes')
+            raise activation.ActivationError('Synthetic host unavailable')
+        with self.assertRaises(activation.ActivationError):
+            self.run_commission(control, synchronize_budget=fail)
+        self.assertEqual(control.events[-1], 'stop')
+        self.assertNotIn('write-open', control.events)
+        self.assertTrue(control.state['locked'])
+        self.assertTrue(control.start_states[0]['locked'])
 
     def test_existing_manual_or_alert_incident_is_never_reopened_or_published_over(self):
         for reason in ['manual', 'verified-alert', 'recovery']:
@@ -178,7 +230,7 @@ class ActivationTests(unittest.TestCase):
             with self.assertRaises(activation.ActivationError):
                 self.run_commission(control)
             self.assertNotIn('start', control.events)
-            self.assertNotIn('publish-restart', control.events)
+            self.assertNotIn('stage-package', control.events)
 
     def test_controller_failure_does_not_stop_existing_budget(self):
         control = FakeControl()
@@ -209,7 +261,7 @@ class ActivationTests(unittest.TestCase):
     def test_alert_during_publication_is_preserved(self):
         control = FakeControl()
         def publish():
-            control.events.append('publish-restart')
+            control.events.append('stage-package')
             control.state['reason'] = 'verified-alert'
             control.state['generation'] += 1
             control.state['handledAlertHashes'] = ['B' * 43]

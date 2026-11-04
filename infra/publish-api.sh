@@ -3,11 +3,12 @@ set -euo pipefail
 umask 077
 usage() {
   cat <<'USAGE'
-Usage: infra/publish-api.sh --subscription ID --resource-group NAME --function-app NAME --storage-account NAME --blob-name RELEASE.zip --package /absolute/path/RELEASE.zip
+Usage: infra/publish-api.sh --subscription ID --resource-group NAME --function-app NAME --storage-account NAME --blob-name RELEASE.zip --package /absolute/path/RELEASE.zip [--stage-only]
 
 Publishes code to EXISTING backend resources using your Azure CLI identity.
 Existing release blobs are reused only when their bytes match the local package.
 Does not create resources, enable shared keys, generate SAS tokens, or print app settings.
+--stage-only updates the verified package URL without restarting or synchronizing the app.
 USAGE
 }
 subscription=''
@@ -16,8 +17,10 @@ function_app=''
 storage_account=''
 blob_name=''
 package=''
+stage_only=false
 while (($#)); do
   if [[ "$1" == '--help' || "$1" == '-h' ]]; then usage; exit 0; fi
+  if [[ "$1" == '--stage-only' ]]; then stage_only=true; shift; continue; fi
   if (($# < 2)); then usage >&2; exit 2; fi
   case "$1" in
     --subscription) subscription=$2 ;;
@@ -111,12 +114,15 @@ fail_azure() {
   local operation=$1 details='' code=''
   if [[ -f "$error_file" ]]; then details=$(<"$error_file"); fi
   case "$details" in
-    *AuthorizationPermissionMismatch*|*AuthorizationFailed*|*AuthorizationFailure*|*Forbidden*|*403*|*"You do not have the required permissions"*)
+    *AuthorizationPermissionMismatch*|*AuthorizationFailed*|*AuthorizationFailure*|*"You do not have the required permissions"*)
       printf 'Azure denied permission to %s.\n' "$operation" >&2
       echo 'Publishing needs Blob Data Contributor on the function-packages container and Website Contributor on this Function App. New grants can take time to apply.' >&2
       ;;
     *)
       printf 'Azure could not %s. The release package is safe to retry once startup or connectivity is restored.\n' "$operation" >&2
+      if [[ "$operation" == 'synchronize API routes' ]]; then
+        echo 'The Function host may be stopped, starting, or unavailable. Verify host startup before changing access roles; a runtime 403 alone does not establish an Azure permission failure.' >&2
+      fi
       ;;
   esac
   for code in AuthorizationPermissionMismatch AuthorizationFailed AuthorizationFailure \
@@ -177,6 +183,10 @@ if ! az functionapp config appsettings set --subscription "$subscription" --reso
     --name "$function_app" --settings "WEBSITE_RUN_FROM_PACKAGE=$package_url" \
     --only-show-errors --output none 2> "$error_file"; then
   fail_azure 'set the Function App package URL'
+fi
+if "$stage_only"; then
+  printf 'API package staged; Function App was not started or restarted.\n'
+  exit 0
 fi
 if ! az functionapp restart --subscription "$subscription" --resource-group "$resource_group" \
     --name "$function_app" --only-show-errors --output none 2> "$error_file"; then

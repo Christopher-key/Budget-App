@@ -273,8 +273,8 @@ function ConnectedApp({ config }: { config: PublicConfig }) {
   function signOut() { session?.dispose(); current.current = null; setSession(null); }
   return <>{service.phase !== 'open' && <main className="entry-shell"><section className="entry-card">
     <div className="brand-mark">B</div><p className="eyebrow">Your private budget</p>
-    <h1>{service.phase === 'locked' ? 'Service temporarily locked' : service.phase === 'checking' ? 'Checking service security' : 'Service temporarily unavailable'}</h1>
-    <p role="status" className="muted">{service.phase === 'locked' ? LOCKDOWN_MESSAGE : service.phase === 'checking' ? 'Please wait while we verify that access is available.' : SECURITY_UNAVAILABLE_MESSAGE}</p>
+    <h1>{service.phase === 'locked' ? 'Unscheduled Maintenance' : service.phase === 'checking' ? 'Checking availability' : 'Service temporarily unavailable'}</h1>
+    <p role="status" className="muted">{service.phase === 'locked' ? LOCKDOWN_MESSAGE : service.phase === 'checking' ? 'Please wait while we check service availability.' : SECURITY_UNAVAILABLE_MESSAGE}</p>
     {service.phase !== 'checking' && <button className="primary full" onClick={() => { if (config.securityGateRequired) void security.check(); else window.location.reload(); }}>Check again</button>}
   </section></main>}
   {session ? <div hidden={service.phase !== 'open'}><BudgetApp session={session} signOut={signOut}/></div>
