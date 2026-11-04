@@ -262,6 +262,14 @@ initialized control record. It prints the verified public status URL needed by
 the website build. Creating its Azure resources may incur usage charges; Duo
 and automatic alert services are not enabled by this command.
 
+The SimpleBudget website workflow defaults to the commissioned controller at
+`https://budget-security-77hl2mdzm5osq.azurewebsites.net/api/service/status`.
+The public GitHub variable `VITE_SECURITY_STATUS_URL` can override this default
+for a deliberate controller migration. Builds using that setting require the
+status check before sign-in and include its exact origin in the browser CSP.
+This connects the website to the gate; it does not configure automatic alerts
+or an MFA provider.
+
 See [administrator access evaluation](ADMIN-ACCESS.md) for free Entra Security
 Defaults, its limits, and the proposed separation of developers, managers and
 security operators. These identity policies and portal roles are not configured
