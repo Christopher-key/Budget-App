@@ -80,6 +80,14 @@ result establishes that unknown vulnerabilities or unrecognized secrets cannot
 exist. The offline ZIP also passed its source-only/unsafe-path/private-pattern
 inspection.
 
+GitHub verified source commit `be27263f0db40c3dcb008d728efe598a248955a2`:
+[security/CodeQL checks](https://github.com/Christopher-key/Budget-App/actions/runs/41759036568),
+[cloud checks and API release](https://github.com/Christopher-key/Budget-App/actions/runs/41759036518),
+[Swift checks](https://github.com/Christopher-key/Budget-App/actions/runs/41759036500),
+and [website deployment](https://github.com/Christopher-key/Budget-App/actions/runs/41759036476)
+all succeeded. Both CodeQL analyses passed the no-findings result gate. This
+applies to the selected queries and source commit, not live Azure settings.
+
 ## Native draft and remaining limits
 
 Native code is excluded from `web/dist` and the API package. The paused, uncommitted
@@ -114,8 +122,10 @@ there but must still be published using the owner's Azure identity. Source chang
 alone do not patch a running Function App. No Azure identity is available in the
 Codex workspace, so that live publication cannot be performed here.
 
-After **Cloud application checks** succeeds for this update, run the following in
-Azure Cloud Shell **Bash**. It downloads only the tested code package and preserves
+Run the following in Azure Cloud Shell **Bash**. It is pinned to the release whose
+checks and code package were verified above, so a later documentation-only commit
+does not require a nonexistent new API build. It downloads only that tested
+code package and preserves
 existing keys, account data, and lockdown settings. New immutable package names
 avoid replacing a different release. Publication restarts each Function App and
 may briefly interrupt service. Both hosts use the same package with distinct
@@ -123,10 +133,11 @@ service roles; their existing roles remain unchanged.
 
 ```bash
 set -euo pipefail
+budget_review_sha=be27263f0db40c3dcb008d728efe598a248955a2
 budget_review_dir=$(mktemp -d)
-git clone --quiet --depth 1 --branch main \
+git -c advice.detachedHead=false clone --quiet --depth 1 \
+  --branch "api-build-$budget_review_sha" \
   https://github.com/Christopher-key/Budget-App.git "$budget_review_dir/repository"
-budget_review_sha=$(git -C "$budget_review_dir/repository" rev-parse HEAD)
 bash "$budget_review_dir/repository/infra/publish-github-build.sh" \
   --subscription 70620dac-9725-46a9-b2c6-f02a9c1e31df \
   --resource-group Simpleudget_group \
@@ -140,8 +151,7 @@ bash "$budget_review_dir/repository/infra/publish-github-build.sh" \
   --blob-name "budget-security-$budget_review_sha.zip"
 ```
 
-If a newer source commit does not yet have a published API build, the helper stops
-before uploading. Wait for that commit's checks and publication to succeed, then
-retry. Verify login, sync, and manual lockdown/reopen with a disposable test account
+For a future upgrade, choose a newly verified API release explicitly and retain
+new immutable package filenames. Verify login, sync, and manual lockdown/reopen with a disposable test account
 before using actual financial data. Keep an independent record of your finances;
 three consecutive wrong app PINs deliberately erase the active cloud account.
