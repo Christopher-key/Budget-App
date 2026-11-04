@@ -5,6 +5,10 @@ this repository. Enabled controls depend on the deployed code and configuration;
 source changes alone do not activate optional security features. No hosting
 provider can give an unconditional "no AI will ever see data" guarantee.
 
+The [4 November web source review](WEB-SECURITY-REVIEW.md) records the scoped
+findings, upload/deployment hardening, verification, and remaining live-publication
+step. Dependency audit results are not a vulnerability score for the application.
+
 ## What is kept where
 
 | Information | Browser | API / Azure storage |

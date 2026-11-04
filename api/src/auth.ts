@@ -26,14 +26,17 @@ export class AuthenticationService {
   private async rate(operation: 'parameters' | 'register' | 'login', name: string, source: string) {
     const policies = { parameters: [60, 60_000, 120], register: [5, 3_600_000, 10], login: [12, 900_000, 36] };
     const [accountLimit, window, networkLimit] = policies[operation];
+    const now = this.now();
+    // Admit against a fixed shared bucket before allocating source/name buckets.
+    // Otherwise rotating usernames and addresses can create arbitrarily many
+    // rate records even after the expensive authentication work is exhausted.
+    const admission = operation === 'parameters' ? 'global-auth-parameters' : 'global-auth-work';
+    const limit = operation === 'parameters' ? 600 : 120;
+    if (!await this.repository.consumeRate(admission, limit, 60_000, now)) throw new ApiError(429, 'RATE_LIMITED');
     const sourceBucket = keyedHash(this.config.lookupKey, 'rate-source-' + operation, source);
     const accountBucket = keyedHash(this.config.lookupKey, 'rate-account-' + operation, name);
-    if (!await this.repository.consumeRate(sourceBucket, networkLimit, window, this.now()) ||
-        !await this.repository.consumeRate(accountBucket, accountLimit, window, this.now())) throw new ApiError(429, 'RATE_LIMITED');
-    // Also bounds distributed requests with different usernames and source addresses.
-    if (operation !== 'parameters' && !await this.repository.consumeRate('global-auth-work', 120, 60_000, this.now())) {
-      throw new ApiError(429, 'RATE_LIMITED');
-    }
+    if (!await this.repository.consumeRate(sourceBucket, networkLimit, window, now) ||
+        !await this.repository.consumeRate(accountBucket, accountLimit, window, now)) throw new ApiError(429, 'RATE_LIMITED');
   }
   async parameters(input: { username?: unknown }, source = 'unavailable'): Promise<AuthParameters> {
     const name = username(input.username); await this.rate('parameters', name, source);

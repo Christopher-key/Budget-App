@@ -17,7 +17,7 @@ function memoryControl(state = initial()) {
   };
 }
 process.env.APP_ORIGIN = 'https://budget.example.test';
-const request = (body = {}, token) => ({ method: 'POST', headers: new Headers({ origin: process.env.APP_ORIGIN, 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }), async text() { return JSON.stringify(body); } });
+const request = (body = {}, token) => ({ method: 'POST', headers: new Headers({ origin: process.env.APP_ORIGIN, 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }), body: new Response(JSON.stringify(body)).body });
 const routes = ['parameters', 'register', 'login', 'logout', 'status', 'setup', 'unlock', 'lock', 'pin', 'erase', 'budget'];
 
 test('private security control is strict; missing/invalid gate configuration cannot silently open', async () => {
@@ -38,7 +38,7 @@ test('all budget/account endpoints deny locked and unverifiable security before 
   for (const broken of [false, true]) {
     store.broken = broken;
     for (const route of routes) {
-      const input = request(); input.text = async () => { reads++; throw new Error('must not read credentials'); };
+      const input = request(); Object.defineProperty(input, 'body', { get() { reads++; throw new Error('must not read credentials'); } });
       const response = await handler(input, route);
       assert.equal(response.status, 503, route);
       assert.equal(response.jsonBody.code, broken ? 'SECURITY_STATE_UNAVAILABLE' : 'SERVICE_LOCKED', route);
@@ -158,7 +158,7 @@ test('RS256 alert JWT binds trusted tenant, issuer, audience, dedicated caller o
 test('alert authentication happens before reading body or triggering denial; public status stays available during lock', async () => {
   const store = memoryControl({ ...initial(), locked: true }); let reads = 0, stops = 0;
   const handler = createControllerHandler(() => ({ gate: new BlobSecurityGate(store), controller: new LockdownController(store, async () => { stops++; }), alertConfig: () => config, verify: async () => { throw new ApiError(401, 'ALERT_AUTH_REQUIRED'); } }));
-  const input = request(alert()); input.text = async () => { reads++; return JSON.stringify(alert()); };
+  const input = request(alert()); Object.defineProperty(input, 'body', { get() { reads++; throw new Error('must authenticate before reading credentials'); } });
   const denied = await handler(input, 'alerts');
   assert.equal(denied.status, 401); assert.equal(reads, 0); assert.equal(stops, 0);
   const status = await handler(request(), 'status');

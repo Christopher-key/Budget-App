@@ -25,10 +25,7 @@ export interface Ledger {
 }
 export interface AccountStatus { state: 'new' | 'locked' | 'erased'; epoch: number; accountId: string; revision?: number }
 export interface UnlockResponse { epoch: number; unlockToken: string; expiresAt: string }
+// Decrypted device state only; cloud requests use cloud.ts encrypted envelopes.
 export interface BudgetEnvelope { epoch: number; revision: number; ledger: Ledger }
-export interface SaveBudgetRequest { epoch: number; revision: number; ledger: Ledger }
-export type ApiErrorCode = 'AUTH_REQUIRED' | 'SETUP_REQUIRED' | 'LOCKED' |
-  'INCORRECT_PASSCODE' | 'ACCOUNT_ERASED' | 'STALE_EPOCH' | 'REVISION_CONFLICT' |
-  'INVALID_DATA' | 'UNAVAILABLE';
 export const MAX_FAILED_PASSCODES = 3;
 export const UNLOCK_HEADER = 'X-Budget-Unlock';

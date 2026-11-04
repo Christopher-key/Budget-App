@@ -1,5 +1,5 @@
 import type { BudgetPlan, Ledger, MonthlyBudget, ReportedExpense } from './contracts.js';
-import { expenseCategories, monthId, monthSummary, moneyText, parseMoney, summary, transactionsIn, validateLedger, windows } from './model.js';
+import { MAX_MONEY_CENTS as MAX_CENTS, expenseCategories, monthId, monthSummary, moneyText, parseMoney, summary, transactionsIn, validateLedger, windows } from './model.js';
 
 type Cell = { kind: 'text'; value: string } | { kind: 'money'; value: bigint } |
   { kind: 'number'; value: number } | null;
@@ -10,7 +10,6 @@ interface Sheet {
 export interface WorkbookOptions { monthIds: string[]; includeNotes: boolean; createdAt?: Date }
 
 const MAX_BYTES = 32 * 1024 * 1024;
-const MAX_CENTS = 999_999_999_999_999n;
 const M = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const P = 'http://schemas.openxmlformats.org/package/2006/relationships';

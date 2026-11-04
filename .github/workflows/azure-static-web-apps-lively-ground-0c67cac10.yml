@@ -15,14 +15,16 @@ jobs:
     timeout-minutes: 15
     name: Verify and deploy website
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
           cache: npm
           cache-dependency-path: web/package-lock.json
+      - name: Reject known website runtime and build vulnerabilities
+        run: npm audit --prefix web --audit-level=low
       - name: Install website dependencies
         run: npm ci --prefix web
       - name: Verify website security behavior
@@ -34,7 +36,7 @@ jobs:
           VITE_SECURITY_STATUS_URL: ${{ vars.VITE_SECURITY_STATUS_URL || 'https://budget-security-77hl2mdzm5osq.azurewebsites.net/api/service/status' }}
       - name: Deploy prebuilt website
         id: deployment
-        uses: Azure/static-web-apps-deploy@v1
+        uses: Azure/static-web-apps-deploy@1a947af9992250f3bc2e68ad0754c0b0c11566c9 # v1
         with:
           azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_LIVELY_GROUND_0C67CAC10 }}
           action: upload

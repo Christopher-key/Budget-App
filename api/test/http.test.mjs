@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { app } from '@azure/functions';
+import { app, HttpRequest } from '@azure/functions';
 import { ApiError } from '../dist/api/src/types.js';
 import { fixture, pin, encrypted, unlockInput } from './helpers.mjs';
 
@@ -17,11 +17,20 @@ function request(value = {}, options = {}) {
   return {
     method: options.method ?? 'POST',
     headers: new Headers({ origin, 'content-type': 'application/json', ...options.headers }),
-    async text() { return options.text ?? JSON.stringify(value); },
+    body: new Response(options.text ?? JSON.stringify(value)).body,
   };
 }
 const authenticated = (f, value, options = {}) => request(value, {
   ...options, headers: { authorization: 'Bearer ' + f.session.token, ...options.headers },
+});
+
+test('the bounded parser accepts the actual Azure HTTP request stream', async () => {
+  const handle = createHandler(() => ({ authentication: { async parameters(input) { return input; } }, service: {} }));
+  const input = new HttpRequest({ method: 'POST', url: origin + '/api/auth/parameters',
+    headers: { origin, 'content-type': 'application/json' }, body: { string: '{"username":"synthetic-sdk"}' } });
+  const response = await handle(input, 'parameters');
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.jsonBody, { username: 'synthetic-sdk' });
 });
 
 test('all deployed account and financial routes reject missing identity before reading a body or opening database clients', async () => {
@@ -32,7 +41,7 @@ test('all deployed account and financial routes reject missing identity before r
     for (const authorization of ['', 'Bearer malformed.token']) {
       let reads = 0;
       const input = request({}, { headers: { authorization, 'x-ms-client-principal-id': 'untrusted-owner' } });
-      input.text = async () => { reads++; throw new Error('Must not read this body.'); };
+      Object.defineProperty(input, 'body', { get() { reads++; throw new Error('Must not read this body.'); } });
       const response = await handler(input);
       assert.equal(response.status, 401, name);
       assert.deepEqual(response.jsonBody, { code: 'AUTH_REQUIRED' });
@@ -48,7 +57,7 @@ test('cross-origin and missing-origin writes fail before reading credentials or 
   const handle = createHandler(() => { resolves++; throw new Error('Must remain unopened.'); });
   for (const received of ['https://attacker.example.test', 'null', '']) {
     const input = request({}, { headers: { origin: received } });
-    input.text = async () => { throw new Error('Must not read this body.'); };
+    Object.defineProperty(input, 'body', { get() { throw new Error('Must not read this body.'); } });
     const response = await handle(input, 'register');
     assert.equal(response.status, 403);
     assert.deepEqual(response.jsonBody, { code: 'ORIGIN_REJECTED' });
@@ -65,6 +74,7 @@ test('public login accepts only derived proofs and rejects password fields and o
     [request({}, { text: '[]' }), 400],
     [request({}, { text: '{invalid' }), 400],
     [request({}, { headers: { 'content-type': 'text/plain' } }), 400],
+    [request({}, { headers: { 'content-type': 'application/json-invalid' } }), 400],
     [request({}, { headers: { 'content-length': '1025' } }), 413],
     [request({}, { text: ' '.repeat(1025) }), 413],
   ]) {
@@ -73,6 +83,49 @@ test('public login accepts only derived proofs and rejects password fields and o
     assert.deepEqual(response.jsonBody, { code: 'INVALID_DATA' });
   }
   assert.equal(calls, 0);
+});
+
+test('oversized streaming uploads are cancelled without reading their remaining chunks', async () => {
+  let calls = 0;
+  const handle = createHandler(() => ({ authentication: { async login() { calls++; return {}; } }, service: {} }));
+  for (const headers of [{}, { 'content-length': '1' }]) {
+    let reads = 0, cancelled = false;
+    const input = request({}, { headers });
+    input.body = new ReadableStream({
+      pull(controller) {
+        reads++;
+        controller.enqueue(Buffer.alloc(600, ' '));
+        if (reads > 10) throw new Error('Must reject before reading the full upload.');
+      },
+      cancel() { cancelled = true; },
+    }, { highWaterMark: 0 });
+    const response = await handle(input, 'login');
+    assert.equal(response.status, 413);
+    assert.deepEqual(response.jsonBody, { code: 'INVALID_DATA' });
+    assert.equal(reads, 2);
+    assert.equal(cancelled, true);
+  }
+  assert.equal(calls, 0);
+});
+
+test('body limits count UTF-8 bytes across chunks and accept the exact boundary', async () => {
+  let calls = 0;
+  const handle = createHandler(() => ({ authentication: { async parameters(input) { calls++; return input; } }, service: {} }));
+  const bytes = Buffer.from(JSON.stringify({ username: 'é'.repeat(504) + 'a' }));
+  assert.equal(bytes.length, 1024);
+  const input = request({}, { headers: { 'content-type': 'Application/JSON; charset=utf-8' } });
+  // Split a multibyte character across chunks; decode only after the bounded read.
+  input.body = new ReadableStream({ start(controller) {
+    controller.enqueue(bytes.subarray(0, 14));
+    controller.enqueue(bytes.subarray(14));
+    controller.close();
+  } });
+  assert.equal((await handle(input, 'parameters')).status, 200);
+  assert.equal(calls, 1);
+  const malformed = request();
+  malformed.body = new Response(new Uint8Array([123, 34, 120, 34, 58, 34, 255, 34, 125])).body;
+  assert.equal((await handle(malformed, 'parameters')).status, 400);
+  assert.equal(calls, 1);
 });
 
 test('network rate-limit sources ignore caller prefixes and changing source ports', async () => {

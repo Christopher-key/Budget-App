@@ -38,7 +38,7 @@ function fixture(gate?: SecurityGate) {
     const headers = new Headers(init?.headers); headers.set('origin', origin);
     const method = init?.method ?? 'GET', body = String(init?.body ?? '');
     requests.push({ path, method, headers, body });
-    const response = await handle({ method, headers, text: async () => body } as never, routes[path]);
+    const response = await handle({ method, headers, body: new Response(body).body } as never, routes[path]);
     return new Response(response.jsonBody === undefined ? null : JSON.stringify(response.jsonBody), {
       status: response.status, headers: response.headers as HeadersInit,
     });

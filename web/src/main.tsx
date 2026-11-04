@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { BudgetPlan, Ledger, MonthlyBudget, PayFrequency, ReportedExpense, SavingsBucket } from '../../shared/contracts.js';
-import { applySchedule, bucketBalances, categoryWarnings, emptyPlan, expenseCategories, formatMoney, monthId, monthSummary, moneyText, newMonth, parseMoney, summary, transactionsIn, validateLedger, windows } from '../../shared/model.js';
+import type { BudgetPlan, Ledger, PayFrequency, ReportedExpense, SavingsBucket } from '../../shared/contracts.js';
+import { applySchedule, bucketBalances, categoryWarnings, expenseCategories, formatMoney, monthId, monthSummary, newMonth, parseMoney, summary, transactionsIn, validateLedger, windows } from '../../shared/model.js';
 import { exportWorkbook } from '../../shared/xlsx.js';
 import { authenticate, validatePublicConfig, type PublicConfig } from './auth.js';
 import { BudgetApi, BudgetSession } from './api.js';

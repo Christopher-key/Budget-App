@@ -72,6 +72,11 @@ Requires Xcode 15 or later and an **iOS App / SwiftUI** target with iOS 16 or la
 Your local app icons, signing settings, bundle identifier, and Xcode project are
 not part of these source files. Configure those in Xcode.
 
+`OfflineBudgetSource.zip` is a frozen convenience snapshot of the older offline
+edition. Use the individual source files on `main` for current fixes and features.
+The archive is excluded from website and API builds. Native cloud integration is
+paused and is not part of the published source release.
+
 ## Export to Excel
 
 Open **Settings → Export to Excel**, choose months, enter your app passcode, and

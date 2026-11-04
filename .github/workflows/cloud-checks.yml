@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', 'Verification/*cloud*', 'Verification/*lockdown*', 'Verification/test-api-publisher.py', 'Verification/test-deployment-guard.py', '.github/workflows/cloud-checks.yml']
+    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', 'Verification/*cloud*', 'Verification/*lockdown*', 'Verification/*deployment*', 'Verification/test-api-publisher.py', '.github/workflows/cloud-checks.yml', '.github/workflows/azure-static-web-apps-lively-ground-0c67cac10.yml']
   pull_request:
-    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', 'Verification/*cloud*', 'Verification/*lockdown*', 'Verification/test-api-publisher.py', 'Verification/test-deployment-guard.py', '.github/workflows/cloud-checks.yml']
+    paths: ['web/**', 'api/**', 'shared/**', 'infra/**', 'Verification/*cloud*', 'Verification/*lockdown*', 'Verification/*deployment*', 'Verification/test-api-publisher.py', '.github/workflows/cloud-checks.yml', '.github/workflows/azure-static-web-apps-lively-ground-0c67cac10.yml']
 
 permissions:
   contents: read
@@ -16,12 +16,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
+      - name: Verify deployment action pins
+        run: |
+          python3 Verification/check-deployment-workflows.py
+          python3 Verification/test-deployment-workflows.py
+      - name: Reject known runtime and build dependency vulnerabilities
+        run: |
+          npm audit --prefix api --audit-level=low
+          npm audit --prefix web --audit-level=low
+          npm audit --prefix shared --audit-level=low
       - name: Verify Azure expiry and indexing compatibility
         run: |
           az bicep install
@@ -43,7 +52,7 @@ jobs:
       - name: Package deployable API
         run: ./infra/package-api.sh "$RUNNER_TEMP/budget-api.zip"
       - name: Keep API package for owner deployment
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: budget-api-package
           path: ${{ runner.temp }}/budget-api.zip

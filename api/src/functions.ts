@@ -37,12 +37,30 @@ function requireOrigin(request: HttpRequest) {
   if ((origin !== null && origin !== configured) || (request.method !== 'GET' && origin !== configured)) throw new ApiError(403, 'ORIGIN_REJECTED');
 }
 async function body(request: HttpRequest, allowed: string[], max = MAX_BODY): Promise<Record<string, unknown>> {
-  if (!(request.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json')) throw new ApiError(400, 'INVALID_DATA');
+  if ((request.headers.get('content-type') ?? '').split(';', 1)[0].trim().toLowerCase() !== 'application/json') throw new ApiError(400, 'INVALID_DATA');
   const length = Number(request.headers.get('content-length') ?? 0);
   if (!Number.isFinite(length) || length < 0 || length > max) throw new ApiError(413, 'INVALID_DATA');
-  let text: string;
-  try { text = await request.text(); } catch { throw new ApiError(400, 'INVALID_DATA'); }
-  if (Buffer.byteLength(text, 'utf8') > max) throw new ApiError(413, 'INVALID_DATA');
+  const reader = request.body?.getReader();
+  if (!reader) throw new ApiError(400, 'INVALID_DATA');
+  // Bound allocation even when Content-Length is absent or incorrect. Never
+  // collect a complete oversized body (or an unbounded list of tiny chunks).
+  const bytes = Buffer.alloc(max);
+  let size = 0, complete = false, text: string;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) { complete = true; break; }
+      if (!(value instanceof Uint8Array)) throw new ApiError(400, 'INVALID_DATA');
+      if (value.byteLength > max - size) throw new ApiError(413, 'INVALID_DATA');
+      bytes.set(value, size); size += value.byteLength;
+    }
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, size));
+  } catch (error) {
+    throw error instanceof ApiError ? error : new ApiError(400, 'INVALID_DATA');
+  } finally {
+    if (!complete) void reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
   let result: unknown;
   try { result = JSON.parse(text); } catch { throw new ApiError(400, 'INVALID_DATA'); }
   if (!result || typeof result !== 'object' || Array.isArray(result)
@@ -173,4 +191,7 @@ export function registerRoutes(role = process.env.SERVICE_ROLE, http = app.http.
 }
 
 }
+// Let the bounded reader stop uploads before the worker buffers a whole body.
+// Requires the supported Azure Functions v4 host (4.28 or later).
+app.setup({ enableHttpStream: true });
 registerRoutes();

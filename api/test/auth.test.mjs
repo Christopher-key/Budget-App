@@ -85,3 +85,52 @@ test('missing secrets and malformed public credentials fail closed', async () =>
   await assert.rejects(auth.register({ username: 'valid-user', proof: 'plaintext-password', salt: proof(), wrappedKey: wrapped() }), errorIs(400, 'INVALID_DATA'));
   await assert.rejects(auth.register({ username: 'valid-user', proof: proof(), salt: proof(), wrappedKey: { ...wrapped(), data: 'plaintext-key' } }), errorIs(400, 'INVALID_DATA'));
 });
+
+test('distributed parameter requests have a shared allocation bound before creating distinct source/name records', async () => {
+  const inner = new MemoryRepository(), buckets = new Set(); let reads = 0, time = now;
+  const repository = {
+    async read(...args) { reads++; return inner.read(...args); },
+    commit: (...args) => inner.commit(...args),
+    async consumeRate(bucket, ...args) { buckets.add(bucket); return inner.consumeRate(bucket, ...args); },
+  };
+  const a = new AuthenticationService(repository, config, () => time), b = new AuthenticationService(repository, config, () => time);
+  for (let index = 0; index < 600; index++) {
+    await (index % 2 ? a : b).parameters({ username: 'synthetic-name-' + index }, 'synthetic-source-' + index);
+  }
+  assert.equal(reads, 600);
+  const allocated = buckets.size;
+  assert.equal(allocated, 1201, 'one shared admission bucket and two buckets per admitted request');
+  for (let index = 600; index < 620; index++) {
+    await assert.rejects((index % 2 ? a : b).parameters({ username: 'synthetic-name-' + index }, 'synthetic-source-' + index), errorIs(429, 'RATE_LIMITED'));
+  }
+  assert.equal(buckets.size, allocated, 'denied rotating sources cannot allocate more dynamic buckets');
+  assert.equal(reads, 600, 'denied requests cannot query account records');
+  time += 60_000;
+  assert.ok((await b.parameters({ username: 'synthetic-after-window' }, 'new-synthetic-source')).salt);
+  assert.equal(reads, 601);
+});
+
+test('login and registration share admission before dynamic allocation and do not erase account data when exhausted', async () => {
+  const f = await fixture(), before = await f.repository.read(f.identity.ownerId);
+  // Registration used one of the existing 120 expensive-work admissions.
+  for (let index = 0; index < 119; index++) {
+    assert.equal(await f.repository.consumeRate('global-auth-work', 120, 60_000, now), true);
+  }
+  const buckets = new Set(); let reads = 0;
+  const repository = {
+    async read(...args) { reads++; return f.repository.read(...args); },
+    commit: (...args) => f.repository.commit(...args),
+    async consumeRate(bucket, ...args) { buckets.add(bucket); return f.repository.consumeRate(bucket, ...args); },
+  };
+  const a = new AuthenticationService(repository, config, () => now), b = new AuthenticationService(repository, config, () => now);
+  for (let index = 0; index < 20; index++) {
+    const input = { ...f.credentials, username: 'synthetic-overflow-' + index };
+    await assert.rejects((index % 2 ? a : b).login(input, 'overflow-login-' + index), errorIs(429, 'RATE_LIMITED'));
+    await assert.rejects((index % 2 ? b : a).register(input, 'overflow-register-' + index), errorIs(429, 'RATE_LIMITED'));
+  }
+  assert.deepEqual([...buckets], ['global-auth-work']);
+  assert.equal(reads, 0);
+  assert.deepEqual(await f.repository.read(f.identity.ownerId), before);
+  // Parameter discovery has a separate allowance and consumes no KDF capacity.
+  assert.equal((await a.parameters({ username: f.credentials.username }, 'separate-parameters')).accountId, f.identity.ownerId);
+});
