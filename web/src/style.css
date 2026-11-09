@@ -140,6 +140,17 @@ small, .small { font-size: .78rem; line-height: 1.65; }
 .privacy-list li { margin-bottom: 8px; }
 .privacy-note { background: #f6f5ef; border-radius: 9px; padding: 14px; font-size: .73rem; color: #786e55; line-height: 1.7; margin: 20px 0; }
 .goal-list { display: grid; gap: 14px; }
+.interest-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 26px; align-items: start; }
+.interest-layout > div { min-width: 0; }
+.interest-calculator .money-input { grid-template-columns: minmax(0, 1fr) 140px; margin: 0 0 20px; }
+.interest-result { background: #edf6f0; border-radius: 12px; padding: 24px; }
+.interest-result output { display: block; color: var(--green); font-size: clamp(1.5rem, 3vw, 2.2rem); font-weight: 700; letter-spacing: -.04em; overflow-wrap: anywhere; }
+.interest-result .eyebrow { margin-bottom: 10px; }
+.interest-result dl { border-top: 1px solid var(--line); margin: 20px 0 0; padding-top: 12px; font-size: .78rem; }
+.interest-result dl > div { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; }
+.interest-result dd { margin: 0; font-weight: 600; }
+.interest-assumptions { margin: 20px 0 8px; }
+@media (max-width: 650px) { .interest-layout { grid-template-columns: 1fr; gap: 8px; } }
 .goal-row { display: flex; align-items: center; gap: 17px; padding: 21px 23px; background: white; border: 1px solid var(--line); border-radius: 12px; }
 .goal-row.inactive, .goal-row.archived { background: #f7f9f8; }
 .goal-icon { display: grid; place-items: center; width: 45px; height: 45px; background: #edf6f0; border-radius: 12px; color: #51876e; font-size: 1.35rem; flex-shrink: 0; }

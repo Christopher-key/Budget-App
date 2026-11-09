@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { BudgetPlan, Ledger, PayFrequency, ReportedExpense, SavingsBucket } from '../../shared/contracts.js';
-import { applySchedule, bucketBalances, categoryWarnings, expenseCategories, formatMoney, monthId, monthSummary, newMonth, parseMoney, summary, transactionsIn, validateLedger, windows } from '../../shared/model.js';
+import { applySchedule, bucketBalances, categoryWarnings, expenseCategories, formatMoney, monthId, monthSummary, moneyText, newMonth, parseMoney, summary, transactionsIn, validateLedger, windows } from '../../shared/model.js';
+import { estimateMonthlyDividend, parseAnnualRate, type AnnualRateType } from '../../shared/interest.js';
 import { exportWorkbook } from '../../shared/xlsx.js';
 import { authenticate, validatePublicConfig, type PublicConfig } from './auth.js';
 import { BudgetApi, BudgetSession } from './api.js';
@@ -137,6 +138,50 @@ function Trends({ ledger }: { ledger: Ledger }) {
   return <><PageHeading title="See the bigger picture" subtitle="Your progress, one month at a time."/><section className="card"><div className="section-heading"><h2>Calendar-year spending</h2><span className="chart-legend"><i className="orange-dot"/>{year}<i className="purple-dot"/>{year - 1}</span></div><p className="muted small">Budgeted expenses minus Realistic expenses. Above zero means under budget.</p><div className="chart-scroll"><svg viewBox="0 0 700 290" role="img" aria-label="Current and previous year monthly spending compared with budget"><line x1="40" x2="660" y1="145" y2="145" stroke="#9aabae" strokeDasharray="4 4"/>{[-1, 0, 1].map(v => <text x="0" y={145 - v * 105} fontSize="11" fill="#687f84" key={v}>{v === 0 ? '$0' : `${v > 0 ? '+' : '-'}$${Math.round(extent)}`}</text>)}{[year - 1, year].map(yr => { const list = points.filter(p => p.year === yr).sort((a, b) => a.month - b.month); return <g key={yr}>{list.slice(1).map((p, i) => list[i].month + 1 === p.month ? <line key={p.id} x1={x(list[i].month)} y1={y(list[i].value)} x2={x(p.month)} y2={y(p.value)} stroke={yr === year ? '#df8947' : '#9d76bc'} strokeWidth="2.5" strokeDasharray={yr === year ? undefined : '5 4'}/> : null)}{list.map(p => <circle key={p.id} cx={x(p.month)} cy={y(p.value)} r="5.5" fill={p.value >= 0n ? '#187e64' : '#c05252'}><title>{p.id}: {formatMoney(p.value)}</title></circle>)}</g>; })}{Array.from({ length: 12 }, (_, i) => <text x={x(i + 1)} y="280" textAnchor="middle" fill="#687f84" fontSize="11" key={i}>{new Date(2026, i, 1).toLocaleDateString(undefined, { month: 'short' })}</text>)}</svg></div>{!points.length && <p className="muted small">Enter budgeted expenses and Realistic spending to start your comparison.</p>}</section><section className="card history-table"><h2>Monthly history</h2><div className="table-scroll"><table><thead><tr><th>Month</th><th>Income</th><th>Expenses</th><th>Savings change</th><th>Remaining</th></tr></thead><tbody>{[...ledger.months].filter(m => m.id <= monthId()).sort((a, b) => b.id.localeCompare(a.id)).map(m => { const s = monthSummary(m, 'realistic'); return <tr key={m.id}><th>{fullMonth(m.id)}{m.id === monthId() && <small>In progress</small>}</th><td>{formatMoney(s.income)}</td><td>{formatMoney(s.expenses)}</td><td>{formatMoney(s.savings - s.withdrawn)}</td><td className={s.remaining < 0n ? 'negative' : ''}>{formatMoney(s.remaining)}</td></tr>; })}</tbody></table></div></section></>;
 }
 
+function SavingsInterestCalculator({ buckets, balances }: { buckets: SavingsBucket[]; balances: Map<string, bigint> }) {
+  const [balance, setBalance] = useState(''), [source, setSource] = useState('custom');
+  const [rate, setRate] = useState(''), [type, setType] = useState<AnnualRateType>('apy');
+  const rateErrorID = React.useId();
+  const bucket = buckets.find(value => value.id === source);
+  const balanceValue = bucket ? moneyText(balances.get(bucket.id) ?? 0n) : balance;
+  const invalidRate = rate.trim() !== '' && parseAnnualRate(rate) === null;
+  const estimate = useMemo(() => {
+    try { return estimateMonthlyDividend(balanceValue, rate, type); }
+    catch { return null; }
+  }, [balanceValue, rate, type]);
+  const percent = (value: number) => `${value.toLocaleString(undefined, { maximumFractionDigits: 6 })}%`;
+  return <section className="card interest-calculator" aria-labelledby="interest-calculator-heading">
+    <h2 id="interest-calculator-heading">Monthly dividend calculator</h2>
+    <p className="muted small">Convert a yearly APR or APY into an estimated monthly savings payout.</p>
+    <div className="interest-layout">
+      <div>
+        {buckets.length > 0 && <label className="field">Balance source<select aria-label="Balance source" value={bucket ? source : 'custom'} onChange={event => { setBalance(balanceValue); setSource(event.target.value); }}>
+          <option value="custom">Custom amount</option>
+          {buckets.map(value => <option key={value.id} value={value.id}>{value.name}{value.isActive ? '' : ' (archived)'}</option>)}
+        </select></label>}
+        <Money label="Savings balance" value={balanceValue} onChange={value => { setBalance(value); setSource('custom'); }}/>
+        <div className="inline-fields">
+          <label className="field">Yearly rate type<select aria-label="Yearly rate type" value={type} onChange={event => setType(event.target.value as AnnualRateType)}>
+            <option value="apy">APY</option><option value="apr">APR</option>
+          </select></label>
+          <label className="field">Yearly rate (%)<input inputMode="decimal" value={rate} placeholder="e.g. 4.5" maxLength={12} aria-invalid={invalidRate} aria-describedby={invalidRate ? rateErrorID : undefined} onChange={event => setRate(event.target.value)}/></label>
+        </div>
+        {invalidRate && <p className="error" id={rateErrorID}>Enter a yearly rate from 0% to 100% with up to four decimal places.</p>}
+        <p className="muted small">{type === 'apr' ? 'APR is divided by 12 for the monthly rate.' : 'APY includes compounding; this uses its equivalent monthly rate.'}</p>
+      </div>
+      <div className="interest-result">
+        <p className="eyebrow">Estimated monthly dividend</p>
+        <output aria-live="polite" aria-atomic="true">{estimate ? formatMoney(estimate.monthlyDividend) : '—'}</output>
+        <p className="muted small">{estimate ? 'per month' : 'Enter a balance and yearly rate.'}</p>
+        {estimate && <dl><div><dt>Monthly rate</dt><dd>{percent(estimate.monthlyRatePercent)}</dd></div>
+          <div><dt>Equivalent {type === 'apy' ? 'APR' : 'APY'}</dt><dd>{percent(type === 'apy' ? estimate.aprPercent : estimate.apyPercent)}</dd></div></dl>}
+      </div>
+    </div>
+    <p className="muted small interest-assumptions">Assumes a fixed balance and rate with equal monthly periods. APY assumes reinvested dividends; withdrawing them reduces the annual return. Actual payouts depend on daily balances and account terms.</p>
+    <p className="muted small">Calculator inputs stay in this page’s memory. Your recorded savings change only when you edit your budget.</p>
+  </section>;
+}
+
 function Goals({ ledger, update }: { ledger: Ledger; update: (l: Ledger) => void }) {
   const [draft, setDraft] = useState<SavingsBucket | null>(null), [error, setError] = useState('');
   const balances = bucketBalances(ledger);
@@ -149,7 +194,7 @@ function Goals({ ledger, update }: { ledger: Ledger; update: (l: Ledger) => void
     const next = { ...ledger, savingsBuckets: [...ledger.savingsBuckets.filter(b => b.id !== draft.id), { ...draft, name: draft.name.trim() }] };
     try { validateLedger(next); update(next); setDraft(null); } catch { setError('Check the goal name and target amount.'); }
   }
-  return <><PageHeading title="Something to look forward to" subtitle="Give your savings a name and a purpose."><button className="primary" onClick={() => open()}>+ New goal</button></PageHeading><section className="card"><div className="section-heading"><h2>Your savings buckets</h2><span className="muted small">{ledger.savingsBuckets.filter(b => b.isActive).length} active</span></div><p className="muted small">Add actual contributions in Budget to build your progress. These are your recorded allocations, not verified bank balances.</p><div className="goal-list">{ledger.savingsBuckets.map(bucket => { const balance = balances.get(bucket.id) ?? 0n, target = amount(bucket.target), percent = Math.max(0, Math.min(100, Number(balance * 100n / target))); return <div className={`goal-row ${bucket.isActive ? '' : 'archived'}`} key={bucket.id}><div className="goal-icon" aria-hidden="true">{bucket.name.toLowerCase().includes('car') ? '↗' : '◎'}</div><button className="goal-copy" onClick={() => open(bucket)}><strong>{bucket.name}{!bucket.isActive && <small>Archived</small>}</strong><span className={balance < 0n ? 'negative' : ''}>{formatMoney(balance)} <span className="muted">/ {formatMoney(target)}</span></span><progress className="goal-progress" max="100" value={percent} aria-label={`${bucket.name}: ${Math.round(percent)} percent saved`}/></button><div className="goal-actions"><button className="text-button" onClick={() => open(bucket)}>Edit</button><button className="text-button" onClick={() => update({ ...ledger, savingsBuckets: ledger.savingsBuckets.map(b => b.id === bucket.id ? { ...b, isActive: !b.isActive } : b) })}>{bucket.isActive ? 'Archive' : 'Reactivate'}</button></div></div>; })}</div>{!ledger.savingsBuckets.length && <Empty title="Dream a little" text="A car, a holiday, a rainy day. Create a goal and start with your next pay period."/>}</section><p className="footer-note">Archiving keeps every contribution and withdrawal. You can still pull from an archived goal in Budget.</p>{draft && <Modal title={ledger.savingsBuckets.some(b => b.id === draft.id) ? 'Edit savings goal' : 'New savings goal'} onClose={() => setDraft(null)}><form onSubmit={save}><label className="field">Goal name<input required maxLength={60} placeholder="A new car" value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })}/></label><Money label="Target" value={draft.target} onChange={target => setDraft({ ...draft, target })}/><label className="check-row"><input type="checkbox" checked={draft.isActive} onChange={e => setDraft({ ...draft, isActive: e.target.checked })}/>Active goal</label>{error && <p className="error" role="alert">{error}</p>}<button className="primary full" disabled={!draft.name.trim() || parseMoney(draft.target) === null || amount(draft.target) <= 0n}>Save goal</button></form></Modal>}</>;
+  return <><PageHeading title="Something to look forward to" subtitle="Give your savings a name and a purpose."><button className="primary" onClick={() => open()}>+ New goal</button></PageHeading><section className="card"><div className="section-heading"><h2>Your savings buckets</h2><span className="muted small">{ledger.savingsBuckets.filter(b => b.isActive).length} active</span></div><p className="muted small">Add actual contributions in Budget to build your progress. These are your recorded allocations, not verified bank balances.</p><div className="goal-list">{ledger.savingsBuckets.map(bucket => { const balance = balances.get(bucket.id) ?? 0n, target = amount(bucket.target), percent = Math.max(0, Math.min(100, Number(balance * 100n / target))); return <div className={`goal-row ${bucket.isActive ? '' : 'archived'}`} key={bucket.id}><div className="goal-icon" aria-hidden="true">{bucket.name.toLowerCase().includes('car') ? '↗' : '◎'}</div><button className="goal-copy" onClick={() => open(bucket)}><strong>{bucket.name}{!bucket.isActive && <small>Archived</small>}</strong><span className={balance < 0n ? 'negative' : ''}>{formatMoney(balance)} <span className="muted">/ {formatMoney(target)}</span></span><progress className="goal-progress" max="100" value={percent} aria-label={`${bucket.name}: ${Math.round(percent)} percent saved`}/></button><div className="goal-actions"><button className="text-button" onClick={() => open(bucket)}>Edit</button><button className="text-button" onClick={() => update({ ...ledger, savingsBuckets: ledger.savingsBuckets.map(b => b.id === bucket.id ? { ...b, isActive: !b.isActive } : b) })}>{bucket.isActive ? 'Archive' : 'Reactivate'}</button></div></div>; })}</div>{!ledger.savingsBuckets.length && <Empty title="Dream a little" text="A car, a holiday, a rainy day. Create a goal and start with your next pay period."/>}</section><p className="footer-note">Archiving keeps every contribution and withdrawal. You can still pull from an archived goal in Budget.</p><SavingsInterestCalculator buckets={ledger.savingsBuckets} balances={balances}/>{draft && <Modal title={ledger.savingsBuckets.some(b => b.id === draft.id) ? 'Edit savings goal' : 'New savings goal'} onClose={() => setDraft(null)}><form onSubmit={save}><label className="field">Goal name<input required maxLength={60} placeholder="A new car" value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })}/></label><Money label="Target" value={draft.target} onChange={target => setDraft({ ...draft, target })}/><label className="check-row"><input type="checkbox" checked={draft.isActive} onChange={e => setDraft({ ...draft, isActive: e.target.checked })}/>Active goal</label>{error && <p className="error" role="alert">{error}</p>}<button className="primary full" disabled={!draft.name.trim() || parseMoney(draft.target) === null || amount(draft.target) <= 0n}>Save goal</button></form></Modal>}</>;
 }
 
 function Schedule({ ledger, update, monthID }: { ledger: Ledger; update: (l: Ledger) => void; monthID?: string }) {
