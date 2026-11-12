@@ -37,6 +37,10 @@ and supporting privacy/verification files, not a complete `.xcodeproj` or an
 App Store release. No real financial records, passcodes, or signing credentials
 are included.
 
+Use the [launch readiness checklist](LAUNCH-CHECKLIST.md) to track production
+verification, security, recovery, product testing, public documentation, and the
+separate native release gates before marketing the service.
+
 ## Features
 
 - Read-only Home with time-of-day greeting, compact savings-bucket progress,
