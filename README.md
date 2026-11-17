@@ -18,13 +18,20 @@ GitHub Actions builds the API and publishes a code-only package with its checksu
 The [Cloud Shell publishing helper](infra/README.md#4-build-and-publish-api-code)
 downloads and deploys that package without browser ZIP transfers or local builds.
 
-On the website, **Savings goals → Monthly dividend calculator** converts a yearly
+On the website, **Savings & Payoffs → Monthly dividend calculator** converts a yearly
 APR or APY into an estimated monthly payout using a custom balance or a saved
 bucket's current balance. APR uses the annual rate divided by 12; APY uses its
 equivalent monthly compounded rate. Payouts round to the nearest cent. The estimate
 assumes a fixed balance and equal monthly periods; account terms and daily
 balances affect actual payments. Calculator entries stay in page memory and do
 not create income entries or alter saved savings. No API update is required.
+
+The website's tab is now **Savings & Payoffs**. Its **+ Fixed payment** button
+adds optional loans, car payments, leases and insurance costs to Home and
+Budgeted plans only when applied. Optional payoff balances and APR/APY inputs
+show estimated payments remaining; self-reported payoff payments update the
+tracker separately from Realistic spending. See [fixed-payment instructions](FIXED-PAYMENTS.md)
+for allocation, overlap, history, interest assumptions and privacy details.
 
 The web account's third consecutive wrong app passcode erases its active encrypted
 budget, login credentials, wrapped encryption key, and grants. Account-password

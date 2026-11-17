@@ -1,5 +1,6 @@
 import type { BudgetPlan, Ledger, MonthlyBudget, PayFrequency } from './contracts.js';
 import { applySchedule, daysInMonth, monthId, monthSummary, newMonth, validateLedger } from './model.js';
+import { applyFixedPaymentsToMonth } from './fixed-payments.js';
 
 /** Four calendar months AFTER the current month, including year rollovers. */
 export function forecastMonthIds(now = new Date()): string[] {
@@ -14,17 +15,17 @@ export function forecastMonthIds(now = new Date()): string[] {
 /** Missing forecast months are previews until an explicit edit or copy saves one. */
 export function planningMonth(ledger: Ledger, id: string, now = new Date()): MonthlyBudget {
   const existing = ledger.months.find(month => month.id === id);
-  if (existing) return structuredClone(existing);
+  if (existing) return applyFixedPaymentsToMonth(existing, ledger.fixedPayments ?? [], now);
   if (![monthId(now), ...forecastMonthIds(now)].includes(id)) throw new Error('Choose the current month or one of the next four months.');
-  return newMonth(id, ledger.payFrequency);
+  return applyFixedPaymentsToMonth(newMonth(id, ledger.payFrequency), ledger.fixedPayments ?? [], now);
 }
 
 export function savePlanningMonth(ledger: Ledger, month: MonthlyBudget, now = new Date()): Ledger {
   const result = structuredClone(ledger), index = result.months.findIndex(value => value.id === month.id);
   if (index < 0) {
     if (![monthId(now), ...forecastMonthIds(now)].includes(month.id)) throw new Error('Choose one of the next four months.');
-    result.months.push(structuredClone(month));
-  } else result.months[index] = structuredClone(month);
+    result.months.push(applyFixedPaymentsToMonth(month, ledger.fixedPayments ?? [], now));
+  } else result.months[index] = applyFixedPaymentsToMonth(month, ledger.fixedPayments ?? [], now);
   // Check the complete ledger without replacing an in-progress entry such as
   // "3" or "3." with "3.00" after each keystroke. Encryption normalizes the
   // persisted representation separately.
@@ -32,14 +33,14 @@ export function savePlanningMonth(ledger: Ledger, month: MonthlyBudget, now = ne
   return result;
 }
 
-function hasInput(plan: BudgetPlan): boolean {
+function hasInput(plan: BudgetPlan, includeFixed: boolean): boolean {
   return [plan.payroll, plan.extra, plan.savings, plan.savingsWithdrawn,
-    ...plan.expenses.map(entry => entry.amount),
+    ...plan.expenses.filter(entry => includeFixed || !entry.fixedPaymentId).map(entry => entry.amount),
     ...plan.bucketEntries.flatMap(entry => [entry.contribution, entry.withdrawal])].some(value => value.trim() !== '');
 }
 
-export function hasBudgetedPlan(month: MonthlyBudget): boolean {
-  return month.periods.some(period => hasInput(period.budgeted));
+export function hasBudgetedPlan(month: MonthlyBudget, includeFixed = true): boolean {
+  return month.periods.some(period => hasInput(period.budgeted, includeFixed));
 }
 
 const defaultDays = (frequency: PayFrequency): number[] => frequency === 'monthly' ? [1]
@@ -51,10 +52,11 @@ export function copyCurrentPlanToForecast(ledger: Ledger, id: string, now = new 
   const input = validateLedger(ledger), source = input.months.find(month => month.id === monthId(now));
   if (!source || !hasBudgetedPlan(source)) throw new Error('Enter the current month’s Budgeted plan before copying it.');
   const existing = input.months.find(month => month.id === id);
-  if (existing && hasBudgetedPlan(existing)) throw new Error('This month already has a plan. Edit its amounts below.');
+  if (existing && hasBudgetedPlan(existing, false)) throw new Error('This month already has a plan. Edit its amounts below.');
   let copied = newMonth(id, source.paySchedule.frequency);
   copied.periods.forEach((period, index) => {
     period.budgeted = structuredClone(source.periods[index].budgeted);
+    period.budgeted.expenses = period.budgeted.expenses.filter(entry => !entry.fixedPaymentId);
     period.budgeted.expenses = period.budgeted.expenses.map(entry => ({ ...entry, id: crypto.randomUUID() }));
   });
   // Invalid paydays in shorter months are cleared for explicit selection.
@@ -76,8 +78,10 @@ export function copyCurrentPlanToForecast(ledger: Ledger, id: string, now = new 
 
 export function forecastSummary(ledger: Ledger, now = new Date()) {
   return forecastMonthIds(now).map(id => {
-    const month = ledger.months.find(value => value.id === id);
-    if (!month) return { id, planned: false, income: 0n, expenses: 0n, savings: 0n, withdrawn: 0n, remaining: 0n };
+    let month = ledger.months.find(value => value.id === id);
+    const hasFixed = (ledger.fixedPayments ?? []).some(payment => payment.isApplied && payment.startMonth <= id && (!payment.endMonth || id <= payment.endMonth));
+    if (!month && !hasFixed) return { id, planned: false, income: 0n, expenses: 0n, savings: 0n, withdrawn: 0n, remaining: 0n };
+    month = planningMonth(ledger, id, now);
     return { id, planned: hasBudgetedPlan(month), ...monthSummary(month, 'budgeted') };
   });
 }

@@ -1,7 +1,8 @@
 import type { AccountStatus, BudgetEnvelope, Ledger, UnlockResponse } from '../../shared/contracts.js';
 import type { EncryptedBudgetEnvelope } from '../../shared/cloud.js';
 import { UNLOCK_HEADER } from '../../shared/contracts.js';
-import { emptyLedger, validateLedger, monthId, newMonth } from '../../shared/model.js';
+import { emptyLedger, validateLedger, monthId } from '../../shared/model.js';
+import { planningMonth } from '../../shared/forecast.js';
 import type { AuthSession, PublicConfig } from './auth.js';
 import { isServiceFailure, SecurityMonitor, ServiceSecurityError } from './security.js';
 import { decryptLedger, encryptLedger } from './crypto.js';
@@ -304,7 +305,7 @@ export class BudgetSession {
       this.publish({ phase: 'ready', epoch: budget.epoch, revision: budget.revision, ledger, saving: false, message: '' });
       clearTimeout(this.lease);
       this.lease = setTimeout(() => this.lock(), Math.max(0, Date.parse(grant.expiresAt) - Date.now()));
-      if (!ledger.months.some(month => month.id === monthId())) this.edit({ ...ledger, months: [...ledger.months, newMonth(monthId(), ledger.payFrequency)] });
+      if (!ledger.months.some(month => month.id === monthId())) this.edit({ ...ledger, months: [...ledger.months, planningMonth(ledger, monthId())] });
     } catch (error) { if (version === this.version) this.failure(error); }
   }
   edit(ledger: Ledger) {

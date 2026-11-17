@@ -12,6 +12,8 @@ import type { Ledger } from '../shared/contracts.js';
 import type { SecurityGate } from '../shared/security.js';
 import { ApiError } from '../api/src/types.js';
 import { SecurityMonitor } from '../web/src/security.js';
+import { saveFixedPayment } from '../shared/fixed-payments.js';
+import { monthId } from '../shared/model.js';
 
 const origin = 'https://budget.example.test';
 const config = { configured: true as const, apiBaseUrl: 'https://api.example.test' };
@@ -45,6 +47,36 @@ function fixture(gate?: SecurityGate) {
   };
   return { repository, requests, fetcher };
 }
+
+test('a stale device cannot discard newly encrypted fixed-payment fields and reloads their complete plan', async () => {
+  const { fetcher } = fixture();
+  const username = 'synthetic-payment-compatibility', password = 'Synthetic payment check password 2026!';
+  const authA = await authenticate(config, username, password, true, fetcher);
+  const first = new BudgetSession(new BudgetApi(config, authA, fetcher));
+  let second: BudgetSession | undefined;
+  try {
+    await first.checkStatus(); await first.open('3141', true);
+    const authB = await authenticate(config, username, password, false, fetcher);
+    second = new BudgetSession(new BudgetApi(config, authB, fetcher));
+    await second.checkStatus(); await second.open('3141');
+    const oldDocument = structuredClone(second.snapshot().ledger!);
+    assert.equal(oldDocument.fixedPayments, undefined);
+    const paymentId = crypto.randomUUID();
+    first.edit(saveFixedPayment(first.snapshot().ledger!, {
+      id: paymentId, name: 'Synthetic car payment', category: 'Car', monthlyAmount: '300', dueDay: 20,
+      startMonth: monthId(), endMonth: '', isApplied: true, payoffBalance: '1500', annualRate: '5', rateType: 'apr', history: [],
+    }));
+    await first.flush();
+    oldDocument.months[0]!.periods[0]!.realistic.extra = '12';
+    second.edit(oldDocument); await second.flush();
+    assert.equal(second.snapshot().phase, 'conflict');
+    await second.open('3141');
+    assert.equal(second.snapshot().phase, 'ready');
+    assert.equal(second.snapshot().ledger!.fixedPayments![0]!.id, paymentId);
+    assert.equal(second.snapshot().ledger!.months[0]!.periods.flatMap(period => period.budgeted.expenses)
+      .filter(entry => entry.fixedPaymentId === paymentId).length, 1);
+  } finally { first.dispose(); second?.dispose(); }
+});
 
 test('real browser crypto and API sync two devices, then third wrong PIN revokes both without a stale restore', async () => {
   const { repository, requests, fetcher } = fixture();

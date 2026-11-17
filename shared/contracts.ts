@@ -1,7 +1,10 @@
 // Budget model used on devices. Encrypted cloud wire formats live in cloud.ts.
 // Monetary inputs are decimal STRINGS. No credentials belong in this schema.
 export type PayFrequency = 'monthly' | 'biWeekly' | 'weekly';
-export interface ExpenseEntry { id: string; name: string; amount: string }
+export interface ExpenseEntry {
+  id: string; name: string; amount: string;
+  fixedPaymentId?: string; fixedPaymentName?: string; fixedDueDay?: number;
+}
 export interface BucketEntry { id: string; name: string; contribution: string; withdrawal: string }
 export interface BudgetPlan {
   payroll: string; extra: string; savings: string; savingsWithdrawn: string;
@@ -16,12 +19,22 @@ export interface MonthlyBudget {
   paySchedule: { frequency: PayFrequency; days: number[] }; transactions: ReportedExpense[];
 }
 export interface SavingsBucket { id: string; name: string; target: string; isActive: boolean }
+export interface FixedPaymentRecord {
+  id: string; date: string; amount: string; interest: string; principal: string; balanceAfter: string;
+}
+export interface FixedPayment {
+  id: string; name: string; category: string; monthlyAmount: string; dueDay: number;
+  startMonth: string; endMonth: string; isApplied: boolean;
+  payoffBalance: string; annualRate: string; rateType: 'apr' | 'apy';
+  history: FixedPaymentRecord[];
+}
 export interface ExportAudit {
   id: string; createdAt: string; monthIds: string[]; status: 'downloadRequested';
 }
 export interface Ledger {
   schemaVersion: 1; months: MonthlyBudget[]; savingsBuckets: SavingsBucket[];
   payFrequency: PayFrequency; exportHistory: ExportAudit[];
+  fixedPayments?: FixedPayment[];
 }
 export interface AccountStatus { state: 'new' | 'locked' | 'erased'; epoch: number; accountId: string; revision?: number }
 export interface UnlockResponse { epoch: number; unlockToken: string; expiresAt: string }

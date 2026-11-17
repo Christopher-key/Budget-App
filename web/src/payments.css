@@ -1,0 +1,47 @@
+.payment-manager .section-heading { align-items: flex-start; }
+.payment-manager .section-heading .primary { flex-shrink: 0; }
+.payment-list { display: grid; gap: 15px; }
+.payment-row { border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
+.payment-row-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; }
+.payment-row-heading h3 { margin-bottom: 6px; overflow-wrap: anywhere; }
+.payment-row-heading > strong { white-space: nowrap; font-size: .9rem; }
+.payment-row-heading > strong small { font-size: .67rem; font-weight: 400; }
+.payment-row-heading p { margin-bottom: 12px; }
+.payment-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.payment-actions .secondary { padding: 8px 12px; min-height: 38px; font-size: .74rem; }
+.payment-payoff { background: #f3f7f4; padding: 15px 17px; border-radius: 10px; font-size: .77rem; margin: 8px 0; }
+.payment-payoff > div:first-child { display: flex; justify-content: space-between; gap: 12px; }
+.payment-count { margin: 12px 0 5px; color: var(--green); font-weight: 650; }
+.payment-payoff > p:last-child { margin-bottom: 0; }
+.payment-payoff dl, .payment-record-preview { font-size: .76rem; margin: 12px 0; }
+.payment-payoff dl > div, .payment-record-preview > div { display: flex; justify-content: space-between; gap: 12px; margin: 7px 0; }
+.payment-payoff dd, .payment-record-preview dd { margin: 0; font-weight: 600; text-align: right; }
+.payment-history { margin-top: 16px; font-size: .74rem; }
+.payment-history summary { cursor: pointer; color: var(--green); }
+.payment-history ul { padding-left: 20px; }
+.payment-history li { margin: 10px 0; line-height: 1.7; }
+.payment-assumptions { margin: 20px 0 0; }
+.payment-tracking-fields { border-top: 1px solid var(--line); padding-top: 20px; margin-top: 18px; }
+.payments-preview .payment-preview-row { display: flex; justify-content: space-between; gap: 18px; padding: 14px 0; border-top: 1px solid var(--line); font-size: .8rem; }
+.payment-preview-row > div { display: grid; min-width: 0; gap: 6px; }
+.payment-preview-row > div > strong { overflow-wrap: anywhere; }
+.payment-preview-row > strong { text-align: right; white-space: nowrap; }
+.payment-preview-row > strong small { display: block; font-size: .68rem; font-weight: 400; margin-top: 5px; }
+.fixed-plan-lines { border-top: 1px solid var(--line); padding-top: 20px; margin-top: 21px; }
+.fixed-plan-lines dl { margin: 0 0 14px; font-size: .78rem; }
+.fixed-plan-lines dl > div { display: flex; justify-content: space-between; gap: 15px; margin: 14px 0; }
+.fixed-plan-lines dt { display: grid; gap: 5px; min-width: 0; }
+.fixed-plan-lines dt strong { font-weight: 550; overflow-wrap: anywhere; }
+.fixed-plan-lines dt small { font-size: .67rem; color: var(--muted); }
+.fixed-plan-lines dd { margin: 0; white-space: nowrap; font-weight: 600; }
+@media (max-width: 600px) {
+  .payment-manager .section-heading { flex-wrap: wrap; }
+  .payment-row { padding: 15px; }
+  .payment-row-heading { flex-wrap: wrap; gap: 4px; }
+  .payment-row-heading > strong { margin-bottom: 10px; }
+  .payment-actions .secondary { flex: 1 1 auto; }
+  .payment-payoff { padding: 13px; }
+  .payment-payoff > div:first-child { flex-wrap: wrap; }
+  .payment-preview-row { gap: 12px; }
+  .payment-preview-row > strong { white-space: normal; }
+}

@@ -1,11 +1,28 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { emptyLedger } from '../../shared/model.js';
+import { saveFixedPayment, recordFixedPayment } from '../../shared/fixed-payments.js';
 import { createDataKey, decode, decryptLedger, encode, encryptLedger, passwordKeys, randomSalt, unwrapDataKey, validateBlob } from '../src/crypto.js';
 
 const accountId = encode(new Uint8Array(32).fill(7));
 const otherAccount = encode(new Uint8Array(32).fill(8));
 const password = 'a long synthetic password';
+
+test('optional fixed-payment definitions, payoff history and plan snapshots survive encrypted roundtrips', async () => {
+  const now = new Date(2026, 10, 17, 12), key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  let ledger = saveFixedPayment(emptyLedger(now), {
+    id: crypto.randomUUID(), name: 'Synthetic payoff', category: 'Car', monthlyAmount: '100', dueDay: 31,
+    startMonth: '2026-11', endMonth: '', isApplied: true, payoffBalance: '1000', annualRate: '12', rateType: 'apr', history: [],
+  }, now);
+  ledger = recordFixedPayment(ledger, ledger.fixedPayments![0]!.id, '100', now);
+  const blob = await encryptLedger(key, accountId, 2, 7, ledger);
+  assert.doesNotMatch(JSON.stringify(blob), /Synthetic payoff|payoffBalance|monthlyAmount|fixedPaymentId/);
+  const restored = await decryptLedger(key, accountId, 2, 7, blob);
+  assert.deepEqual(restored, ledger);
+  assert.equal(restored.fixedPayments![0]!.payoffBalance, '910.00');
+  assert.equal(restored.fixedPayments![0]!.history.length, 1);
+  assert.equal(restored.months[0]!.periods.flatMap(period => period.budgeted.expenses).filter(entry => entry.fixedPaymentId).length, 1);
+});
 
 test('slow password derivation is repeatable and wrapped data keys require the correct password and account', async () => {
   const salt = randomSalt();
