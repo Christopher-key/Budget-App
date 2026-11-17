@@ -4,15 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node scripts/configure.mjs && vite --host 127.0.0.1",
-    "build": "node scripts/configure.mjs --production && tsc --noEmit && vite build",
+    "dev": "node scripts/configure.mjs && node scripts/build.mjs dev",
+    "build": "node scripts/configure.mjs --production && tsc --noEmit && node scripts/build.mjs build",
     "test": "tsx --test test/*.test.ts",
-    "preview": "vite preview --host 127.0.0.1"
+    "preview": "node scripts/build.mjs preview"
   },
   "dependencies": { "react": "19.3.1", "react-dom": "19.3.1" },
   "devDependencies": {
     "@types/node": "^24.0.0", "@types/react": "19.3.0", "@types/react-dom": "19.3.0",
-    "@vitejs/plugin-react": "6.1.2", "vite": "8.3.5", "typescript": "~5.9.3", "tsx": "4.23.15"
+    "esbuild": "0.28.2", "typescript": "~5.9.3", "tsx": "4.23.15"
   },
   "engines": { "node": ">=22.12" }
 }

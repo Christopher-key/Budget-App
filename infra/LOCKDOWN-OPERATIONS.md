@@ -63,7 +63,7 @@ On success the script prints a public `securityStatusUrl`. Set the GitHub Action
 repository variable `VITE_SECURITY_STATUS_URL` to that exact URL and rebuild the
 Static Web App, or share only that public URL with Codex so the verified website
 configuration can be completed. Azure Static Web App runtime settings do not
-replace this GitHub/Vite build configuration. Do not enable a guessed URL.
+replace this GitHub website build configuration. Do not enable a guessed URL.
 
 **Future infrastructure updates:** the existing `main.bicep` owns the entire API
 app-settings array. Redeploying old backend parameters can remove the gate flags

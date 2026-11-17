@@ -7,6 +7,12 @@ browser, budgets are encrypted before upload, and the server retains salted,
 slow-hashed login verifiers rather than passwords.
 
 The existing Azure Static Web Apps workflow builds and deploys `web/dist`.
+The website uses a direct esbuild bundle with the existing strict dependency
+audits. Run `npm ci --prefix web`, then `npm run build --prefix web`; use
+`npm run dev --prefix web` for local development (refresh after source changes)
+or `npm run preview --prefix web` to preview the production files. Public
+`VITE_API_BASE_URL` and `VITE_SECURITY_STATUS_URL` settings retain their names
+for compatibility with existing deployments.
 [Deployment instructions](AZURE-DEPLOYMENT.md) explain the separate backend and
 public API address used for accounts and sync. The existing website workflow
 defaults to SimpleBudget's deployed API; a repository variable can override it. Website
