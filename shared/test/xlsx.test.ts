@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { emptyLedger, newMonth } from '../model.js';
+import { addExpenseCategory, setExpenseCategoryActive } from '../categories.js';
 import { exportWorkbook } from '../xlsx.js';
 import type { Ledger } from '../contracts.js';
 
@@ -144,4 +145,68 @@ test('selection failures cannot export an unintended full ledger', () => {
     assert.throws(() => exportWorkbook(ledger, { monthIds: ids, includeNotes: false, createdAt: DATE }));
   }
   assert.throws(() => exportWorkbook(ledger, { monthIds: ['2026-01'], includeNotes: false, createdAt: new Date(NaN) }));
+});
+
+test('CY blocks preserve historical categories while hiding new and removed labels in other months', () => {
+  const now = new Date(2026, 10, 17, 12);
+  let ledger = emptyLedger(now);
+  const prior = newMonth('2026-10'), future = newMonth('2026-12');
+  prior.periods[0]!.budgeted.expenses.find(entry => entry.name === 'Home')!.amount = '500';
+  ledger.months.push(prior, future);
+  ledger = addExpenseCategory(ledger, 'Pet care', now);
+  ledger = setExpenseCategoryActive(ledger, 'Home', false, now);
+  const current = ledger.months.find(month => month.id === '2026-11')!;
+  current.periods[0]!.budgeted.expenses.find(entry => entry.name === 'Pet care')!.amount = '25.10';
+  const before = JSON.stringify(ledger);
+  const report = inspect(exportWorkbook(ledger, { monthIds: ['2026-12', '2026-10', '2026-11'], includeNotes: false, createdAt: now }));
+  const cells = report.sheets['CY26 Data']!.cells;
+  const homeRow = Object.entries(cells).find(([ref, value]) => /^C\d+$/.test(ref) && value === 'Home / Rent')![0].slice(1);
+  const petRow = Object.entries(cells).find(([ref, value]) => /^K\d+$/.test(ref) && value === 'Pet care')![0].slice(1);
+  assert.equal(cells['K' + homeRow] ?? null, null, 'removed category label should be hidden in current month');
+  assert.equal(cells['S' + homeRow] ?? null, null, 'removed category label should be hidden in future month');
+  assert.equal(cells['C' + petRow] ?? null, null, 'new category must not label historical blocks');
+  assert.equal(cells['A' + petRow] ?? null, null);
+  assert.equal(cells['B' + petRow] ?? null, null);
+  assert.equal(Number(cells['I' + petRow]), -25.10);
+  assert.equal(cells['S' + petRow], 'Pet care');
+  const monthly = row(report.sheets['Monthly Summary']!.cells, { Month: '2026-11' });
+  assert.equal(Number(monthly['Budgeted Expenses']), 25.10);
+  assert.equal(JSON.stringify(ledger), before);
+
+  const onlyCurrent = inspect(exportWorkbook(ledger, { monthIds: ['2026-11'], includeNotes: false, createdAt: now }));
+  assert.equal(Object.values(onlyCurrent.sheets['CY26 Data']!.cells).includes('Home / Rent'), false,
+    'category rows unused by every selected month should be omitted');
+});
+
+test('retired categories with recorded spending remain visible and reconcile to every total', () => {
+  const now = new Date(2026, 10, 17, 12);
+  let ledger = emptyLedger(now);
+  const month = ledger.months[0]!;
+  month.periods[0]!.budgeted.expenses.find(entry => entry.name === 'Car')!.amount = '60';
+  month.periods[0]!.realistic.expenses.find(entry => entry.name === 'Car')!.amount = '45';
+  month.transactions.push({ id: crypto.randomUUID(), date: '2026-11-12T12:00:00.000Z', dayOfMonth: 12,
+    category: 'Car', amount: '5', note: '' });
+  ledger = setExpenseCategoryActive(ledger, 'Car', false, now);
+  const report = inspect(exportWorkbook(ledger, { monthIds: ['2026-11'], includeNotes: false, createdAt: now }));
+  const cells = report.sheets['CY26 Data']!.cells;
+  const carRow = Object.entries(cells).find(([ref, value]) => /^C\d+$/.test(ref) && value === 'Car')![0].slice(1);
+  assert.equal(Number(cells['A' + carRow]), -60);
+  assert.equal(Number(cells['B' + carRow]), -50);
+  const monthly = row(report.sheets['Monthly Summary']!.cells, { Month: '2026-11' });
+  assert.equal(Number(monthly['Budgeted Expenses']), 60);
+  assert.equal(Number(monthly['Realistic Expenses']), 50);
+  const category = row(report.sheets['Categories']!.cells, { Month: '2026-11', Period: '1', Plan: 'Realistic', Category: 'Car' });
+  assert.equal(Number(category['Manual Amount']), 45);
+  assert.equal(Number(category['Logged Amount']), 5);
+  assert.equal(Number(category['Total Amount']), 50);
+});
+
+test('custom category labels are literal Excel text and cannot create executable formulas', () => {
+  const now = new Date(2026, 10, 17, 12), name = '=HYPERLINK("https://example.test","Synthetic")';
+  const ledger = addExpenseCategory(emptyLedger(now), name, now);
+  ledger.months[0]!.periods[0]!.realistic.expenses.find(entry => entry.name === name)!.amount = '12.34';
+  const report = inspect(exportWorkbook(ledger, { monthIds: ['2026-11'], includeNotes: false, createdAt: now }));
+  assert.equal(Object.values(report.sheets['CY26 Data']!.cells).includes(name), true);
+  const category = row(report.sheets['Categories']!.cells, { Month: '2026-11', Period: '1', Plan: 'Realistic', Category: name });
+  assert.equal(Number(category['Total Amount']), 12.34);
 });

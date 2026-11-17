@@ -1,6 +1,6 @@
 import type {
   BudgetPlan, BucketEntry, ExpenseEntry, ExportAudit, Ledger, MonthlyBudget,
-  PayFrequency, PeriodBudget, ReportedExpense, SavingsBucket, FixedPayment,
+  PayFrequency, PeriodBudget, ReportedExpense, SavingsBucket, FixedPayment, ExpenseCategory,
 } from './contracts.js';
 import { annualRateText, parseAnnualRate } from './rates.js';
 
@@ -44,10 +44,10 @@ function amount(input: string): bigint {
 const blank = (value: string): boolean => value.trim() === '';
 const countFor = (frequency: PayFrequency): number => ({ monthly: 1, biWeekly: 2, weekly: 4 })[frequency];
 
-export function emptyPlan(): BudgetPlan {
+export function emptyPlan(names: string[] = expenseCategories): BudgetPlan {
   return {
     payroll: '', extra: '', savings: '', savingsWithdrawn: '',
-    expenses: expenseCategories.map(name => ({ id: crypto.randomUUID(), name, amount: '' })), bucketEntries: [],
+    expenses: names.map(name => ({ id: crypto.randomUUID(), name, amount: '' })), bucketEntries: [],
   };
 }
 
@@ -68,14 +68,14 @@ export function daysInMonth(identifier: string): number {
     : [4, 6, 9, 11].includes(month) ? 30 : 31;
 }
 
-export function newMonth(id: string, frequency: PayFrequency = 'biWeekly'): MonthlyBudget {
+export function newMonth(id: string, frequency: PayFrequency = 'biWeekly', names?: string[]): MonthlyBudget {
   const { year, month } = parts(id);
   if (!Object.hasOwn({ monthly: 1, biWeekly: 1, weekly: 1 }, frequency)) throw new Error('Invalid pay frequency.');
   const date = new Date(0);
   date.setUTCFullYear(year, month - 1, 1); date.setUTCHours(12, 0, 0, 0);
   return {
-    id, date: date.toISOString(), periods: Array.from({ length: countFor(frequency) }, () => ({ realistic: emptyPlan(), budgeted: emptyPlan() })),
-    paySchedule: { frequency, days: [] }, transactions: [],
+    id, date: date.toISOString(), periods: Array.from({ length: countFor(frequency) }, () => ({ realistic: emptyPlan(names), budgeted: emptyPlan(names) })),
+    paySchedule: { frequency, days: [] }, transactions: [], ...(names === undefined ? {} : { expenseCategories: [...names] }),
   };
 }
 
@@ -156,6 +156,8 @@ export function applySchedule(month: MonthlyBudget, schedule: MonthlyBudget['pay
   const normalized = validateSchedule(schedule, month.id);
   if (normalized.days.length !== countFor(normalized.frequency)) throw new Error('Choose every pay date before saving.');
   const result = structuredClone(month), desired = countFor(normalized.frequency);
+  const names = result.expenseCategories ?? [...new Set(result.periods.flatMap(period =>
+    [...period.realistic.expenses, ...period.budgeted.expenses].filter(entry => !entry.fixedPaymentId).map(entry => entry.name)))];
   const fixed = result.periods.flatMap(period => period.budgeted.expenses.filter(entry => entry.fixedPaymentId));
   for (const period of result.periods) period.budgeted.expenses = period.budgeted.expenses.filter(entry => !entry.fixedPaymentId);
   if (desired < result.periods.length) {
@@ -165,7 +167,7 @@ export function applySchedule(month: MonthlyBudget, schedule: MonthlyBudget['pay
       last.budgeted = combine(last.budgeted, extra.budgeted);
     }
     result.periods = result.periods.slice(0, desired);
-  } else while (result.periods.length < desired) result.periods.push({ realistic: emptyPlan(), budgeted: emptyPlan() });
+  } else while (result.periods.length < desired) result.periods.push({ realistic: emptyPlan(names), budgeted: emptyPlan(names) });
   result.paySchedule = normalized;
   const periods = windows(result);
   for (const entry of fixed) {
@@ -276,7 +278,7 @@ function validateSchedule(value: unknown, month: string): MonthlyBudget['paySche
   if (new Set(days).size !== days.length || (days.length !== 0 && days.length !== countFor(type))) fail();
   return { frequency: type, days: days.sort((a, b) => a - b) };
 }
-function validatePlan(value: unknown, bucketIds: Set<string> | undefined, fixedIds?: Set<string>, allowFixed = true): BudgetPlan {
+function validatePlan(value: unknown, bucketIds: Set<string> | undefined, fixedIds?: Set<string>, allowFixed = true, categoryNames?: Set<string>): BudgetPlan {
   const p = object(value, ['payroll', 'extra', 'savings', 'savingsWithdrawn', 'expenses', 'bucketEntries']);
   const expenses: ExpenseEntry[] = array(p.expenses, 1000).map(value => {
     const entry = object(value, ['id', 'name', 'amount', 'fixedPaymentId', 'fixedPaymentName', 'fixedDueDay']);
@@ -288,7 +290,7 @@ function validatePlan(value: unknown, bucketIds: Set<string> | undefined, fixedI
       result.fixedPaymentId = paymentId;
       result.fixedPaymentName = name(entry.fixedPaymentName, 60);
       result.fixedDueDay = integer(entry.fixedDueDay, 1, 31);
-      if (!expenseCategories.includes(result.name) || !result.amount.trim() || amount(result.amount) <= 0n) fail();
+      if ((categoryNames && !categoryNames.has(result.name)) || !result.amount.trim() || amount(result.amount) <= 0n) fail();
     }
     return result;
   });
@@ -306,8 +308,15 @@ function validatePlan(value: unknown, bucketIds: Set<string> | undefined, fixedI
 
 /** Validate and normalize a detached copy. User ownership is never accepted in the document. */
 export function validateLedger(value: unknown): Ledger {
-  const root = object(value, ['schemaVersion', 'months', 'savingsBuckets', 'payFrequency', 'exportHistory', 'fixedPayments']);
+  const root = object(value, ['schemaVersion', 'months', 'savingsBuckets', 'payFrequency', 'exportHistory', 'fixedPayments', 'expenseCategories']);
   if (root.schemaVersion !== 1) fail();
+  const categories: ExpenseCategory[] = array(root.expenseCategories, 100, true).map(value => {
+    const category = object(value, ['name', 'isActive']);
+    if (typeof category.isActive !== 'boolean') fail();
+    return { name: name(category.name), isActive: category.isActive };
+  });
+  unique(categories, category => category.name.toLocaleLowerCase('en-US'));
+  const knownCategories = new Set([...expenseCategories, ...categories.map(category => category.name)]);
   let paymentHistoryCount = 0;
   const recordIds = new Set<string>();
   const fixedPayments: FixedPayment[] = array(root.fixedPayments, 200, true).map(value => {
@@ -317,7 +326,7 @@ export function validateLedger(value: unknown): Ledger {
     const rate = typeof payment.annualRate === 'string' ? parseAnnualRate(payment.annualRate) : null;
     if (!monthlyAmount.trim() || amount(monthlyAmount) <= 0n || rate === null ||
         (payment.rateType !== 'apr' && payment.rateType !== 'apy') || typeof payment.isApplied !== 'boolean' ||
-        typeof payment.category !== 'string' || !expenseCategories.includes(payment.category) ||
+        typeof payment.category !== 'string' || !knownCategories.has(payment.category) ||
         typeof payment.startMonth !== 'string' || typeof payment.endMonth !== 'string') fail();
     parts(payment.startMonth);
     if (payment.endMonth) { parts(payment.endMonth); if (payment.endMonth < payment.startMonth) fail(); }
@@ -350,14 +359,16 @@ export function validateLedger(value: unknown): Ledger {
   let transactionCount = 0;
   const transactionIds = new Set<string>();
   const months: MonthlyBudget[] = array(root.months, 1200).map(value => {
-    const month = object(value, ['id', 'date', 'periods', 'paySchedule', 'transactions']);
+    const month = object(value, ['id', 'date', 'periods', 'paySchedule', 'transactions', 'expenseCategories']);
     if (typeof month.id !== 'string') fail();
     const identifier = month.id;
     parts(identifier);
+    const names = month.expenseCategories === undefined ? undefined : array(month.expenseCategories, 100).map(value => name(value));
+    if (names) unique(names, value => value.toLocaleLowerCase('en-US'));
     const paySchedule = validateSchedule(month.paySchedule, identifier);
     const periods: PeriodBudget[] = array(month.periods, 4).map(value => {
       const period = object(value, ['realistic', 'budgeted']);
-      return { realistic: validatePlan(period.realistic, bucketIds, fixedIds, false), budgeted: validatePlan(period.budgeted, bucketIds, fixedIds) };
+      return { realistic: validatePlan(period.realistic, bucketIds, fixedIds, false, knownCategories), budgeted: validatePlan(period.budgeted, bucketIds, fixedIds, true, knownCategories) };
     });
     if (periods.length !== countFor(paySchedule.frequency)) fail();
     const managedIds = periods.flatMap(period => period.budgeted.expenses.flatMap(entry => entry.fixedPaymentId ? [entry.fixedPaymentId] : []));
@@ -373,7 +384,7 @@ export function validateLedger(value: unknown): Ledger {
       return { id: txId, date: isoDate(tx.date), dayOfMonth: integer(tx.dayOfMonth, 1, daysInMonth(identifier)),
         category: name(tx.category), amount: txAmount, note: (tx.note ?? '') as string };
     });
-    return { id: identifier, date: isoDate(month.date), periods, paySchedule, transactions };
+    return { id: identifier, date: isoDate(month.date), periods, paySchedule, transactions, ...(names === undefined ? {} : { expenseCategories: names }) };
   });
   unique(months, month => month.id);
   const exportHistory: ExportAudit[] = array(root.exportHistory, 1000, true).map(value => {
@@ -390,6 +401,7 @@ export function validateLedger(value: unknown): Ledger {
     payFrequency: root.payFrequency === undefined ? 'biWeekly' : frequency(root.payFrequency), exportHistory };
   // Preserve the exact legacy shape until the optional feature is used.
   if (root.fixedPayments !== undefined) result.fixedPayments = fixedPayments;
+  if (root.expenseCategories !== undefined) result.expenseCategories = categories;
   if (new TextEncoder().encode(JSON.stringify(result)).byteLength > MAX_LEDGER_BYTES) fail();
   return result;
 }

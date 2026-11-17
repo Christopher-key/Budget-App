@@ -17,7 +17,9 @@ export interface ReportedExpense {
 export interface MonthlyBudget {
   id: string; date: string; periods: PeriodBudget[];
   paySchedule: { frequency: PayFrequency; days: number[] }; transactions: ReportedExpense[];
+  expenseCategories?: string[];
 }
+export interface ExpenseCategory { name: string; isActive: boolean }
 export interface SavingsBucket { id: string; name: string; target: string; isActive: boolean }
 export interface FixedPaymentRecord {
   id: string; date: string; amount: string; interest: string; principal: string; balanceAfter: string;
@@ -35,6 +37,7 @@ export interface Ledger {
   schemaVersion: 1; months: MonthlyBudget[]; savingsBuckets: SavingsBucket[];
   payFrequency: PayFrequency; exportHistory: ExportAudit[];
   fixedPayments?: FixedPayment[];
+  expenseCategories?: ExpenseCategory[];
 }
 export interface AccountStatus { state: 'new' | 'locked' | 'erased'; epoch: number; accountId: string; revision?: number }
 export interface UnlockResponse { epoch: number; unlockToken: string; expiresAt: string }

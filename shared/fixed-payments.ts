@@ -1,6 +1,7 @@
 import type { ExpenseEntry, FixedPayment, Ledger, MonthlyBudget } from './contracts.js';
 import { daysInMonth, monthId, moneyText, newMonth, parseMoney, validateLedger, windows } from './model.js';
 import { recordEstimatedPayment, recordPaymentWithInterest } from './payoff.js';
+import { activeExpenseCategories, applyExpenseCategoriesToMonth } from './categories.js';
 
 export function appliedFixedPayments(ledger: Ledger, identifier: string): FixedPayment[] {
   return (ledger.fixedPayments ?? []).filter(payment => payment.isApplied && payment.startMonth <= identifier
@@ -33,7 +34,7 @@ export function applyFixedPaymentsToMonth(month: MonthlyBudget, payments: FixedP
 function syncPlans(ledger: Ledger, now: Date): Ledger {
   const current = monthId(now);
   if (!ledger.months.some(month => month.id === current)) ledger.months.push(newMonth(current, ledger.payFrequency));
-  ledger.months = ledger.months.map(month => applyFixedPaymentsToMonth(month, ledger.fixedPayments ?? [], now));
+  ledger.months = ledger.months.map(month => applyExpenseCategoriesToMonth(ledger, applyFixedPaymentsToMonth(month, ledger.fixedPayments ?? [], now), now));
   return validateLedger(ledger);
 }
 
@@ -49,6 +50,9 @@ export function saveFixedPayment(input: Ledger, payment: FixedPayment, now = new
   const ledger = validateLedger(input), payments = ledger.fixedPayments ?? [];
   const saved = structuredClone(payment);
   finishPayoff(saved, now);
+  if (saved.isApplied && !activeExpenseCategories(ledger).includes(saved.category)) {
+    throw new Error('Restore this expense category or choose an active category before applying the fixed payment.');
+  }
   ledger.fixedPayments = [...payments.filter(value => value.id !== payment.id), saved];
   return syncPlans(validateLedger(ledger), now);
 }
@@ -58,6 +62,9 @@ export function setFixedPaymentApplied(input: Ledger, identifier: string, applie
   if (!payment || typeof applied !== 'boolean') throw new Error('Choose an existing fixed payment.');
   payment.isApplied = applied;
   if (applied) finishPayoff(payment, now);
+  if (payment.isApplied && !activeExpenseCategories(ledger).includes(payment.category)) {
+    throw new Error('Restore this expense category or choose an active category before applying the fixed payment.');
+  }
   return syncPlans(ledger, now);
 }
 

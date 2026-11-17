@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { BudgetPlan, Ledger, PayFrequency, ReportedExpense, SavingsBucket } from '../../shared/contracts.js';
-import { applySchedule, bucketBalances, categoryWarnings, expenseCategories, formatMoney, monthId, monthSummary, moneyText, newMonth, parseMoney, summary, transactionsIn, validateLedger, windows } from '../../shared/model.js';
+import { applySchedule, bucketBalances, categoryWarnings, formatMoney, monthId, monthSummary, moneyText, newMonth, parseMoney, summary, transactionsIn, validateLedger, windows } from '../../shared/model.js';
 import { estimateMonthlyDividend, parseAnnualRate, type AnnualRateType } from '../../shared/interest.js';
+import { applyExpenseCategoriesToMonth, monthExpenseCategories } from '../../shared/categories.js';
 import { exportWorkbook } from '../../shared/xlsx.js';
 import { authenticate, validatePublicConfig, type PublicConfig } from './auth.js';
 import { BudgetApi, BudgetSession } from './api.js';
@@ -11,6 +12,7 @@ import { LOCKDOWN_MESSAGE, SECURITY_UNAVAILABLE_MESSAGE } from '../../shared/sec
 import { SecurityMonitor } from './security.js';
 import { Money, Modal } from './controls.js';
 import { PaymentManager, PaymentPreview, FixedPlanLines } from './Payments.js';
+import { ExpenseCategoryManager } from './ExpenseCategories.js';
 import './style.css';
 
 type Page = 'home' | 'budget' | 'transactions' | 'trends' | 'goals' | 'settings';
@@ -48,11 +50,26 @@ function BucketAmount(plan: BudgetPlan, bucket: SavingsBucket, field: 'contribut
   if (entry.contribution !== '' || entry.withdrawal !== '') copy.bucketEntries.push(entry);
   return copy;
 }
-function PlanEditor({ title, plan, buckets, reported, onChange, monthID }: { monthID: string; title: string; plan: BudgetPlan; buckets: SavingsBucket[]; reported: ReportedExpense[]; onChange: (p: BudgetPlan) => void }) {
+function PreviouslyRecordedExpenses({ plan, reported, categories }: { plan: BudgetPlan; reported: ReportedExpense[]; categories: string[] }) {
+  const totals = new Map<string, bigint>();
+  for (const expense of plan.expenses) if (!expense.fixedPaymentId && !categories.includes(expense.name)) {
+    totals.set(expense.name, (totals.get(expense.name) ?? 0n) + amount(expense.amount));
+  }
+  for (const expense of reported) if (!categories.includes(expense.category)) {
+    totals.set(expense.category, (totals.get(expense.category) ?? 0n) + amount(expense.amount));
+  }
+  const rows = [...totals].filter(([, value]) => value !== 0n);
+  if (!rows.length) return null;
+  return <section className="expense-records" aria-label="Previously recorded expenses"><h3>Previously recorded</h3>
+    <dl>{rows.map(([category, value]) => <div key={category}><dt>{category}</dt><dd>{formatMoney(value)}</dd></div>)}</dl>
+    <p className="muted small">These amounts remain in your totals. Restore a removed category in Manage expenses to edit its unlogged amounts. Reported expenses can still be edited in Transactions.</p>
+  </section>;
+}
+function PlanEditor({ title, plan, buckets, reported, onChange, monthID, categories }: { categories: string[]; monthID: string; title: string; plan: BudgetPlan; buckets: SavingsBucket[]; reported: ReportedExpense[]; onChange: (p: BudgetPlan) => void }) {
   const [withdraw, setWithdraw] = useState(false), [source, setSource] = useState('general'), [withdrawal, setWithdrawal] = useState('');
   const data = summary(plan, reported);
   function choose(id: string) { setSource(id); setWithdrawal(id === 'general' ? plan.savingsWithdrawn : plan.bucketEntries.find(e => e.id === id)?.withdrawal ?? ''); }
-  return <section className="card editor-card"><p className="eyebrow">{title}</p><h3>Income</h3><Money label="Payroll" value={plan.payroll} onChange={v => onChange({ ...plan, payroll: v })}/><Money label="Extra" value={plan.extra} onChange={v => onChange({ ...plan, extra: v })}/><h3>Expenses</h3>{plan.expenses.filter(expense => !expense.fixedPaymentId).map(expense => { const logged = reported.filter(t => t.category === expense.name).reduce((sum, t) => sum + amount(t.amount), 0n); return <div key={expense.id}>{title === 'Realistic' && logged > 0n && <small className="muted">{expense.name}: {formatMoney(logged)} logged separately</small>}<Money label={expense.name} value={expense.amount} onChange={v => onChange({ ...plan, expenses: plan.expenses.map(e => e.id === expense.id ? { ...e, amount: v } : e) })}/></div>; })}<FixedPlanLines plan={plan} monthID={monthID}/><h3>Savings</h3><Money label="Set aside" value={plan.savings} onChange={v => onChange({ ...plan, savings: v })}/>{buckets.filter(b => b.isActive).map(bucket => <Money key={bucket.id} label={bucket.name} value={plan.bucketEntries.find(e => e.id === bucket.id)?.contribution ?? ''} onChange={v => onChange(BucketAmount(plan, bucket, 'contribution', v))}/>)}{buckets.some(b => b.isActive) && <small className="muted">Bucket contributions are additional to Set aside.</small>}{plan.bucketEntries.filter(entry => !buckets.some(b => b.id === entry.id && b.isActive) && entry.contribution.trim()).map(entry => <div className="archived-contribution" key={entry.id}><span>{buckets.find(b => b.id === entry.id)?.name ?? entry.name} <small>(archived)</small></span><strong>{formatMoney(amount(entry.contribution))}</strong></div>)}<button className="withdraw-control" onClick={() => { choose(plan.savingsWithdrawn && amount(plan.savingsWithdrawn) !== 0n ? 'general' : plan.bucketEntries.find(e => amount(e.withdrawal) !== 0n)?.id ?? 'general'); setWithdraw(true); }}><span>Pull from savings</span><strong>{formatMoney(data.withdrawn)} →</strong></button><div className="editor-total"><span>Remaining</span><strong>{formatMoney(data.remaining)}</strong></div>{withdraw && <Modal title="Pull from savings" onClose={() => setWithdraw(false)}><label className="field">Source<select aria-label="Source" value={source} onChange={e => choose(e.target.value)}><option value="general">Set aside (general)</option>{buckets.map(b => <option key={b.id} value={b.id}>{b.name}{b.isActive ? '' : ' (inactive)'}</option>)}</select></label><Money label="Total pulled this pay period" value={withdrawal} onChange={setWithdrawal}/><p className="muted small">Each location keeps its own period total. Clearing the old location and entering the correct one changes an earlier withdrawal’s location. {title === 'Realistic' ? 'Bucket withdrawals reduce saved progress.' : 'Budgeted amounts are plans.'}</p><button className="primary full" disabled={parseMoney(withdrawal) === null} onClick={() => { if (source === 'general') onChange({ ...plan, savingsWithdrawn: withdrawal }); else { const bucket = buckets.find(b => b.id === source); if (bucket) onChange(BucketAmount(plan, bucket, 'withdrawal', withdrawal)); } setWithdraw(false); }}>Save withdrawal total</button></Modal>}</section>;
+  return <section className="card editor-card"><p className="eyebrow">{title}</p><h3>Income</h3><Money label="Payroll" value={plan.payroll} onChange={v => onChange({ ...plan, payroll: v })}/><Money label="Extra" value={plan.extra} onChange={v => onChange({ ...plan, extra: v })}/><h3>Expenses</h3>{plan.expenses.filter(expense => !expense.fixedPaymentId && categories.includes(expense.name)).map(expense => { const logged = reported.filter(t => t.category === expense.name).reduce((sum, t) => sum + amount(t.amount), 0n); return <div key={expense.id}>{title === 'Realistic' && logged > 0n && <small className="muted">{expense.name}: {formatMoney(logged)} logged separately</small>}<Money label={expense.name} value={expense.amount} onChange={v => onChange({ ...plan, expenses: plan.expenses.map(e => e.id === expense.id ? { ...e, amount: v } : e) })}/></div>; })}<PreviouslyRecordedExpenses plan={plan} reported={reported} categories={categories}/><FixedPlanLines plan={plan} monthID={monthID}/><h3>Savings</h3><Money label="Set aside" value={plan.savings} onChange={v => onChange({ ...plan, savings: v })}/>{buckets.filter(b => b.isActive).map(bucket => <Money key={bucket.id} label={bucket.name} value={plan.bucketEntries.find(e => e.id === bucket.id)?.contribution ?? ''} onChange={v => onChange(BucketAmount(plan, bucket, 'contribution', v))}/>)}{buckets.some(b => b.isActive) && <small className="muted">Bucket contributions are additional to Set aside.</small>}{plan.bucketEntries.filter(entry => !buckets.some(b => b.id === entry.id && b.isActive) && entry.contribution.trim()).map(entry => <div className="archived-contribution" key={entry.id}><span>{buckets.find(b => b.id === entry.id)?.name ?? entry.name} <small>(archived)</small></span><strong>{formatMoney(amount(entry.contribution))}</strong></div>)}<button className="withdraw-control" onClick={() => { choose(plan.savingsWithdrawn && amount(plan.savingsWithdrawn) !== 0n ? 'general' : plan.bucketEntries.find(e => amount(e.withdrawal) !== 0n)?.id ?? 'general'); setWithdraw(true); }}><span>Pull from savings</span><strong>{formatMoney(data.withdrawn)} →</strong></button><div className="editor-total"><span>Remaining</span><strong>{formatMoney(data.remaining)}</strong></div>{withdraw && <Modal title="Pull from savings" onClose={() => setWithdraw(false)}><label className="field">Source<select aria-label="Source" value={source} onChange={e => choose(e.target.value)}><option value="general">Set aside (general)</option>{buckets.map(b => <option key={b.id} value={b.id}>{b.name}{b.isActive ? '' : ' (inactive)'}</option>)}</select></label><Money label="Total pulled this pay period" value={withdrawal} onChange={setWithdrawal}/><p className="muted small">Each location keeps its own period total. Clearing the old location and entering the correct one changes an earlier withdrawal’s location. {title === 'Realistic' ? 'Bucket withdrawals reduce saved progress.' : 'Budgeted amounts are plans.'}</p><button className="primary full" disabled={parseMoney(withdrawal) === null} onClick={() => { if (source === 'general') onChange({ ...plan, savingsWithdrawn: withdrawal }); else { const bucket = buckets.find(b => b.id === source); if (bucket) onChange(BucketAmount(plan, bucket, 'withdrawal', withdrawal)); } setWithdraw(false); }}>Save withdrawal total</button></Modal>}</section>;
 }
 function ForecastPanel({ ledger, select }: { ledger: Ledger; select: (id: string) => void }) {
   const rows = forecastSummary(ledger);
@@ -72,6 +89,7 @@ function Budget({ ledger, update }: { ledger: Ledger; update: (l: Ledger) => voi
   const choices = [...new Set([...ledger.months.map(month => month.id), monthId(), ...forecastMonthIds()])].sort((a, b) => b.localeCompare(a));
   const selectedID = choices.includes(selectedMonth) ? selectedMonth : monthId();
   const month = useMemo(() => planningMonth(ledger, selectedID), [ledger, selectedID]);
+  const categories = monthExpenseCategories(month);
   const all = windows(month), day = new Date().getDate();
   const [selected, select] = useState(() => all.find(w => w.startDay <= day && w.endDay >= day)?.index ?? 0);
   const window = all[selected] ?? all[0], period = month.periods[window.index], isFuture = month.id > monthId();
@@ -87,7 +105,7 @@ function Budget({ ledger, update }: { ledger: Ledger; update: (l: Ledger) => voi
     try { update(copyCurrentPlanToForecast(ledger, month.id)); setError(""); }
     catch (failure) { setError(failure instanceof Error ? failure.message : "This plan could not be copied."); }
   };
-  return <><PageHeading title="Make a plan" subtitle="Give each pay period a little direction."/>
+  return <><PageHeading title="Make a plan" subtitle="Give each pay period a little direction."><ExpenseCategoryManager ledger={ledger} update={update}/></PageHeading>
     <ForecastPanel ledger={ledger} select={choose}/>
     <div className="section-heading"><select aria-label="Budget month" value={month.id} onChange={event => choose(event.target.value)}>
       {choices.map(id => <option key={id} value={id}>{fullMonth(id)}{id > monthId() ? " · Forecast" : ""}</option>)}
@@ -99,16 +117,69 @@ function Budget({ ledger, update }: { ledger: Ledger; update: (l: Ledger) => voi
     {error && <p className="error" role="alert">{error}</p>}
     {isFuture && <details key={month.id}><summary>Forecast pay dates</summary><Schedule ledger={ledger} update={update} monthID={month.id}/></details>}
     <div className={isFuture ? undefined : "two-columns"}>
-      {!isFuture && <PlanEditor key={month.id + "-" + window.title + "-realistic"} monthID={month.id} title="Realistic" plan={period.realistic} buckets={ledger.savingsBuckets} reported={transactionsIn(month, window)} onChange={plan => change("realistic", plan)}/>}
-      <PlanEditor key={month.id + "-" + window.title + "-budgeted"} monthID={month.id} title="Budgeted" plan={period.budgeted} buckets={ledger.savingsBuckets} reported={[]} onChange={plan => change("budgeted", plan)}/>
+      {!isFuture && <PlanEditor key={month.id + "-" + window.title + "-realistic"} monthID={month.id} categories={categories} title="Realistic" plan={period.realistic} buckets={ledger.savingsBuckets} reported={transactionsIn(month, window)} onChange={plan => change("realistic", plan)}/>}
+      <PlanEditor key={month.id + "-" + window.title + "-budgeted"} monthID={month.id} categories={categories} title="Budgeted" plan={period.budgeted} buckets={ledger.savingsBuckets} reported={[]} onChange={plan => change("budgeted", plan)}/>
     </div></>;
 }
 function PageHeading({ title, subtitle, children }: { title: string; subtitle: string; children?: React.ReactNode }) { return <div className="page-heading"><div><p className="eyebrow">Your money, with a plan</p><h1>{title}</h1><p className="muted">{subtitle}</p></div>{children}</div>; }
 function Transactions({ ledger, update }: { ledger: Ledger; update: (l: Ledger) => void }) {
   const [selected, select] = useState(monthId()), [draft, setDraft] = useState<ReportedExpense | null>(null), [error, setError] = useState('');
   const month = ledger.months.find(m => m.id === selected) ?? currentMonth(ledger);
-  function save(e: React.FormEvent) { e.preventDefault(); if (!draft) return; try { const date = new Date(draft.date + 'T12:00:00'); const id = monthId(date); if (!Number.isFinite(date.getTime()) || localDate(date) !== draft.date || draft.date > localDate() || amount(draft.amount) <= 0n) throw new Error(); const copy = structuredClone(ledger); for (const m of copy.months) m.transactions = m.transactions.filter(t => t.id !== draft.id); if (!copy.months.some(m => m.id === id)) copy.months.push(newMonth(id, copy.payFrequency)); copy.months.find(m => m.id === id)!.transactions.push({ ...draft, date: date.toISOString(), dayOfMonth: date.getDate() }); validateLedger(copy); update(copy); setDraft(null); setError(''); } catch { setError('Choose a valid date and positive amount.'); } }
-  return <><PageHeading title="The everyday details" subtitle="Small entries. A clearer picture."><button className="primary" onClick={() => setDraft({ id: uuid(), date: localDate(), dayOfMonth: new Date().getDate(), category: expenseCategories[0], amount: '', note: '' })}>+ Report expense</button></PageHeading><section className="card"><div className="section-heading"><select aria-label="Transaction month" value={month.id} onChange={e => select(e.target.value)}>{[...ledger.months].sort((a, b) => b.id.localeCompare(a.id)).map(m => <option key={m.id} value={m.id}>{fullMonth(m.id)}</option>)}</select><strong>{formatMoney(month.transactions.reduce((sum, t) => sum + amount(t.amount), 0n))} logged</strong></div>{[...month.transactions].sort((a, b) => b.dayOfMonth - a.dayOfMonth).map(t => <div className="transaction" key={t.id}><button className="transaction-main" onClick={() => setDraft({ ...t, date: `${month.id}-${String(t.dayOfMonth).padStart(2, '0')}` })}><span className="transaction-symbol">↗</span><span><strong>{t.category}</strong><small>{`${month.id}-${String(t.dayOfMonth).padStart(2, '0')}`}{t.note ? ` · ${t.note}` : ''}</small></span><strong>{formatMoney(amount(t.amount))}</strong></button><button className="icon-button muted" aria-label={`Delete ${t.category} transaction`} onClick={() => { if (confirm('Delete this reported expense?')) update({ ...ledger, months: ledger.months.map(m => ({ ...m, transactions: m.transactions.filter(x => x.id !== t.id) })) }); }}>×</button></div>)}{!month.transactions.length && <Empty title="A fresh page" text="Report a purchase when you’re ready. It will count toward Realistic spending."/>}</section>{draft && <Modal title="Report an expense" onClose={() => setDraft(null)}><form onSubmit={save}><label className="field">Category<select aria-label="Category" value={draft.category} onChange={e => setDraft({ ...draft, category: e.target.value })}>{expenseCategories.map(c => <option key={c}>{c}</option>)}</select></label><label className="field">Date<input type="date" required value={draft.date} onChange={e => setDraft({ ...draft, date: e.target.value })}/></label><Money label="Amount" value={draft.amount} onChange={v => setDraft({ ...draft, amount: v })}/><label className="field">Note <span className="muted">(optional)</span><input maxLength={500} value={draft.note} onChange={e => setDraft({ ...draft, note: e.target.value })}/></label>{error && <p className="error">{error}</p>}<button className="primary full" disabled={parseMoney(draft.amount) === null || amount(draft.amount) <= 0n}>Save expense</button></form></Modal>}</>;
+  function categoriesFor(date: string, transactionID?: string): string[] {
+    const id = date.slice(0, 7);
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(id)) return [];
+    try {
+      const target = ledger.months.find(value => value.id === id)
+        ?? applyExpenseCategoriesToMonth(ledger, newMonth(id, ledger.payFrequency));
+      const categories = monthExpenseCategories(target);
+      const original = target.transactions.find(value => value.id === transactionID);
+      return original && !categories.includes(original.category) ? [...categories, original.category] : categories;
+    } catch { return []; }
+  }
+  const currentCategories = categoriesFor(localDate());
+  const draftCategories = draft ? categoriesFor(draft.date, draft.id) : [];
+  function save(event: React.FormEvent) {
+    event.preventDefault(); if (!draft) return;
+    try {
+      const date = new Date(draft.date + 'T12:00:00'), id = monthId(date);
+      if (!Number.isFinite(date.getTime()) || localDate(date) !== draft.date || draft.date > localDate()
+        || amount(draft.amount) <= 0n || !categoriesFor(draft.date, draft.id).includes(draft.category)) throw new Error();
+      const copy = structuredClone(ledger);
+      for (const value of copy.months) value.transactions = value.transactions.filter(transaction => transaction.id !== draft.id);
+      if (!copy.months.some(value => value.id === id)) copy.months.push(applyExpenseCategoriesToMonth(copy, newMonth(id, copy.payFrequency)));
+      copy.months.find(value => value.id === id)!.transactions.push({ ...draft, date: date.toISOString(), dayOfMonth: date.getDate() });
+      validateLedger(copy); update(copy); setDraft(null); setError('');
+    } catch { setError('Choose a valid date, an available expense category and a positive amount.'); }
+  }
+  return <><PageHeading title="The everyday details" subtitle="Small entries. A clearer picture.">
+    <button className="primary" disabled={!currentCategories.length} onClick={() => { setError(''); setDraft({ id: uuid(), date: localDate(), dayOfMonth: new Date().getDate(), category: currentCategories[0], amount: '', note: '' }); }}>+ Report expense</button>
+  </PageHeading>
+    {!currentCategories.length && <p className="muted small">Add or restore an expense category in Budget → Manage expenses before reporting a new expense.</p>}
+    <section className="card"><div className="section-heading"><select aria-label="Transaction month" value={month.id} onChange={event => select(event.target.value)}>
+      {[...ledger.months].sort((a, b) => b.id.localeCompare(a.id)).map(value => <option key={value.id} value={value.id}>{fullMonth(value.id)}</option>)}
+    </select><strong>{formatMoney(month.transactions.reduce((sum, transaction) => sum + amount(transaction.amount), 0n))} logged</strong></div>
+      {[...month.transactions].sort((a, b) => b.dayOfMonth - a.dayOfMonth).map(transaction => <div className="transaction" key={transaction.id}>
+        <button className="transaction-main" onClick={() => { setError(''); setDraft({ ...transaction, date: `${month.id}-${String(transaction.dayOfMonth).padStart(2, '0')}` }); }}>
+          <span className="transaction-symbol">↗</span><span><strong>{transaction.category}</strong><small>{`${month.id}-${String(transaction.dayOfMonth).padStart(2, '0')}`}{transaction.note ? ` · ${transaction.note}` : ''}</small></span><strong>{formatMoney(amount(transaction.amount))}</strong>
+        </button><button className="icon-button muted" aria-label={`Delete ${transaction.category} transaction`} onClick={() => { if (confirm('Delete this reported expense?')) update({ ...ledger, months: ledger.months.map(value => ({ ...value, transactions: value.transactions.filter(item => item.id !== transaction.id) })) }); }}>×</button>
+      </div>)}
+      {!month.transactions.length && <Empty title="A fresh page" text="Report a purchase when you’re ready. It will count toward Realistic spending."/>}
+    </section>
+    {draft && <Modal title="Report an expense" onClose={() => setDraft(null)}><form onSubmit={save}>
+      <label className="field">Date<input aria-label="Expense date" type="date" required max={localDate()} value={draft.date} onChange={event => {
+        const categories = categoriesFor(event.target.value, draft.id);
+        setDraft({ ...draft, date: event.target.value, category: categories.includes(draft.category) ? draft.category : categories[0] ?? '' });
+      }}/></label>
+      <label className="field">Category<select aria-label="Category" value={draft.category} disabled={!draftCategories.length} onChange={event => setDraft({ ...draft, category: event.target.value })}>
+        {!draftCategories.length && <option value="">No categories available</option>}
+        {draftCategories.map(category => <option key={category}>{category}</option>)}
+      </select></label>
+      <Money label="Amount" value={draft.amount} onChange={value => setDraft({ ...draft, amount: value })}/>
+      <label className="field">Note (optional)<input maxLength={500} value={draft.note} onChange={event => setDraft({ ...draft, note: event.target.value })}/></label>
+      {error && <p className="error" role="alert">{error}</p>}
+      <button className="primary full" disabled={!draftCategories.length || !draftCategories.includes(draft.category) || amount(draft.amount) <= 0n}>Save expense</button>
+    </form></Modal>}
+  </>;
 }
 function Empty({ title, text }: { title: string; text: string }) { return <div className="empty"><div aria-hidden="true">↗</div><h3>{title}</h3><p className="muted">{text}</p></div>; }
 function Trends({ ledger }: { ledger: Ledger }) {

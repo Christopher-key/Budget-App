@@ -1,8 +1,9 @@
 import { useMemo, useRef, useState, type FormEvent } from 'react';
 import type { BudgetPlan, FixedPayment, Ledger } from '../../shared/contracts.js';
 import { appliedFixedPayments, recordFixedPayment, saveFixedPayment, setFixedPaymentApplied } from '../../shared/fixed-payments.js';
-import { daysInMonth, expenseCategories, formatMoney, monthId, moneyText, parseMoney } from '../../shared/model.js';
+import { daysInMonth, formatMoney, monthId, moneyText, parseMoney } from '../../shared/model.js';
 import { estimateMonthlyDividend, parseAnnualRate } from '../../shared/interest.js';
+import { activeExpenseCategories } from '../../shared/categories.js';
 import { estimatePayoff, recordPaymentWithInterest } from '../../shared/payoff.js';
 import { Modal, Money } from './controls.js';
 import './payments.css';
@@ -39,6 +40,7 @@ function PayoffDetails({ payment, compact = false }: { payment: FixedPayment; co
 
 export function PaymentManager({ ledger, update }: { ledger: Ledger; update: (next: Ledger) => void }) {
   const payments = ledger.fixedPayments ?? [];
+  const categories = activeExpenseCategories(ledger);
   const [draft, setDraft] = useState<FixedPayment | null>(null), [tracking, setTracking] = useState(false);
   const [paying, setPaying] = useState<FixedPayment | null>(null), [paymentAmount, setPaymentAmount] = useState('');
   const [manualInterest, setManualInterest] = useState(false), [interestDraft, setInterestDraft] = useState('');
@@ -50,7 +52,7 @@ export function PaymentManager({ ledger, update }: { ledger: Ledger; update: (ne
     original.current = payment ? JSON.stringify(payment) : null;
     setTracking(Boolean(payment?.payoffBalance.trim()));
     setDraft(payment ? structuredClone(payment) : {
-      id: crypto.randomUUID(), name: '', category: 'Car', monthlyAmount: '', dueDay: 1,
+      id: crypto.randomUUID(), name: '', category: categories.includes('Car') ? 'Car' : categories[0] ?? '', monthlyAmount: '', dueDay: 1,
       startMonth: monthId(), endMonth: '', isApplied: false,
       payoffBalance: '', annualRate: '0', rateType: 'apr', history: [],
     });
@@ -115,9 +117,10 @@ export function PaymentManager({ ledger, update }: { ledger: Ledger; update: (ne
   const invalidRate = Boolean(draft && tracking && draft.annualRate.trim() && parseAnnualRate(draft.annualRate) === null);
   return <section className="card payment-manager" aria-labelledby="fixed-payments-heading">
     <div className="section-heading"><h2 id="fixed-payments-heading">Fixed monthly payments</h2>
-      <button className="primary" onClick={() => open()}>+ Fixed payment</button></div>
+      <button className="primary" disabled={!categories.length} onClick={() => open()}>+ Fixed payment</button></div>
     <p className="muted small">Plan loans, car payments, leases, insurance and other fixed costs. Apply each payment when you want it included in Budgeted expenses and on Home.</p>
     {!payments.length && <p className="muted small">Add a monthly amount, then optionally track a payoff balance and interest.</p>}
+    {!categories.length && <p className="muted small">Add or restore an expense category in Budget → Manage expenses before creating a fixed payment.</p>}
     <div className="payment-list">{payments.map(payment => <article className="payment-row" key={payment.id}>
       <div className="payment-row-heading"><div><h3>{payment.name}</h3>
         <p className="muted small">{payment.category} · Due day {payment.dueDay} · {payment.isApplied ? 'Applied to budget' : 'Not applied'}<br/>
@@ -144,7 +147,7 @@ export function PaymentManager({ ledger, update }: { ledger: Ledger; update: (ne
         <label className="field">Payment name<input aria-label="Payment name" required maxLength={60} placeholder="Car loan, lease, insurance…" value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })}/></label>
         <Money label="Monthly payment" value={draft.monthlyAmount} onChange={monthlyAmount => setDraft({ ...draft, monthlyAmount })}/>
         <div className="inline-fields">
-          <label className="field">Expense category<select aria-label="Expense category" value={draft.category} onChange={event => setDraft({ ...draft, category: event.target.value })}>{expenseCategories.map(category => <option key={category}>{category}</option>)}</select></label>
+          <label className="field">Expense category<select aria-label="Expense category" value={draft.category} onChange={event => setDraft({ ...draft, category: event.target.value })}>{[...new Set([...categories, draft.category].filter(Boolean))].map(category => <option key={category} value={category}>{category}{categories.includes(category) ? '' : ' (removed)'}</option>)}</select></label>
           <label className="field">Due day of month<input aria-label="Due day of month" type="number" required min="1" max="31" value={draft.dueDay || ''} onChange={event => setDraft({ ...draft, dueDay: Number(event.target.value) })}/></label>
         </div>
         <p className="muted small">A due day beyond a shorter month's last day uses that month's final day.</p>
@@ -152,7 +155,8 @@ export function PaymentManager({ ledger, update }: { ledger: Ledger; update: (ne
           <label className="field">Starting month<input aria-label="Starting month" type="month" required value={draft.startMonth} onChange={event => setDraft({ ...draft, startMonth: event.target.value })}/></label>
           <label className="field">Final month (optional)<input aria-label="Final month (optional)" type="month" min={draft.startMonth} value={draft.endMonth} onChange={event => setDraft({ ...draft, endMonth: event.target.value })}/></label>
         </div>
-        <label className="check-row"><input type="checkbox" checked={draft.isApplied} onChange={event => setDraft({ ...draft, isApplied: event.target.checked })}/>Apply to Budgeted expenses and Home</label>
+        <label className="check-row"><input type="checkbox" checked={draft.isApplied} disabled={!categories.includes(draft.category)} onChange={event => setDraft({ ...draft, isApplied: event.target.checked })}/>Apply to Budgeted expenses and Home</label>
+        {!categories.includes(draft.category) && <p className="muted small">This category was removed. Choose an active category above or restore it in Budget → Manage expenses before applying this payment.</p>}
         <p className="muted small">Changes update this month and saved future plans. Earlier months keep their recorded amounts. Unapplying removes this payment's current and future Budgeted lines.</p>
         {draft.isApplied && manualCategoryAmount > 0n && <p className="privacy-note">You already have {formatMoney(manualCategoryAmount)} entered manually for {draft.category} this month. This fixed payment is additional. Adjust the manual amount if it already includes this payment.</p>}
         <label className="check-row"><input type="checkbox" checked={tracking} onChange={event => setTracking(event.target.checked)}/>Track an optional payoff balance</label>
@@ -167,7 +171,7 @@ export function PaymentManager({ ledger, update }: { ledger: Ledger; update: (ne
           <PayoffDetails payment={draft}/>
         </div>}
         {error && <p className="error" role="alert">{error}</p>}
-        <button className="primary full" disabled={!draft.name.trim() || !draft.monthlyAmount.trim() || parseMoney(draft.monthlyAmount) === null || (parseMoney(draft.monthlyAmount) ?? 0n) <= 0n || (tracking && (!draft.payoffBalance.trim() || invalidRate))}>Save fixed payment</button>
+        <button className="primary full" disabled={!draft.category || !draft.name.trim() || !draft.monthlyAmount.trim() || parseMoney(draft.monthlyAmount) === null || (parseMoney(draft.monthlyAmount) ?? 0n) <= 0n || (tracking && (!draft.payoffBalance.trim() || invalidRate))}>Save fixed payment</button>
       </form>
     </Modal>}
     {paying && <Modal title={`Record payment · ${paying.name}`} onClose={() => setPaying(null)}>

@@ -1,12 +1,30 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { emptyLedger } from '../../shared/model.js';
+import { emptyLedger, newMonth } from '../../shared/model.js';
+import { addExpenseCategory, monthExpenseCategories, setExpenseCategoryActive } from '../../shared/categories.js';
 import { saveFixedPayment, recordFixedPayment } from '../../shared/fixed-payments.js';
 import { createDataKey, decode, decryptLedger, encode, encryptLedger, passwordKeys, randomSalt, unwrapDataKey, validateBlob } from '../src/crypto.js';
 
 const accountId = encode(new Uint8Array(32).fill(7));
 const otherAccount = encode(new Uint8Array(32).fill(8));
 const password = 'a long synthetic password';
+
+test('custom categories and historical visibility survive encrypted roundtrips without exposing names', async () => {
+  const now = new Date(2026, 10, 17, 12), key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  let ledger = emptyLedger(now);
+  ledger.months.push(newMonth('2026-10'));
+  ledger.months[0]!.periods[0]!.realistic.expenses.find(entry => entry.name === 'Home')!.amount = '125';
+  ledger = addExpenseCategory(ledger, 'Synthetic veterinary', now);
+  ledger = setExpenseCategoryActive(ledger, 'Home', false, now);
+  const blob = await encryptLedger(key, accountId, 3, 9, ledger);
+  assert.doesNotMatch(JSON.stringify(blob), /Synthetic veterinary|expenseCategories|isActive/);
+  const restored = await decryptLedger(key, accountId, 3, 9, blob);
+  assert.deepEqual(restored, ledger);
+  assert.equal(monthExpenseCategories(restored.months.find(month => month.id === '2026-10')!).includes('Synthetic veterinary'), false);
+  const current = restored.months.find(month => month.id === '2026-11')!;
+  assert.equal(monthExpenseCategories(current).includes('Home'), false);
+  assert.equal(current.periods[0]!.realistic.expenses.find(entry => entry.name === 'Home')!.amount, '125.00');
+});
 
 test('optional fixed-payment definitions, payoff history and plan snapshots survive encrypted roundtrips', async () => {
   const now = new Date(2026, 10, 17, 12), key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);

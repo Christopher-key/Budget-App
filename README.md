@@ -39,6 +39,12 @@ show estimated payments remaining; self-reported payoff payments update the
 tracker separately from Realistic spending. See [fixed-payment instructions](FIXED-PAYMENTS.md)
 for allocation, overlap, history, interest assumptions and privacy details.
 
+**Budget → Manage expenses** adds, removes, or restores expense categories.
+Historical months retain their category lists, while current/future budgets use
+the active ones. Recorded amounts remain in totals when a category is removed.
+See [custom expense instructions](CUSTOM-EXPENSES.md) for history, transactions,
+fixed payments, and export behavior.
+
 The web account's third consecutive wrong app passcode erases its active encrypted
 budget, login credentials, wrapped encryption key, and grants. Account-password
 failures are throttled rather than triggering deletion. The native app remains

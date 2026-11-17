@@ -1,6 +1,7 @@
 import type { BudgetPlan, Ledger, MonthlyBudget, PayFrequency } from './contracts.js';
 import { applySchedule, daysInMonth, monthId, monthSummary, newMonth, validateLedger } from './model.js';
 import { applyFixedPaymentsToMonth } from './fixed-payments.js';
+import { activeExpenseCategories, applyExpenseCategoriesToMonth } from './categories.js';
 
 /** Four calendar months AFTER the current month, including year rollovers. */
 export function forecastMonthIds(now = new Date()): string[] {
@@ -15,17 +16,17 @@ export function forecastMonthIds(now = new Date()): string[] {
 /** Missing forecast months are previews until an explicit edit or copy saves one. */
 export function planningMonth(ledger: Ledger, id: string, now = new Date()): MonthlyBudget {
   const existing = ledger.months.find(month => month.id === id);
-  if (existing) return applyFixedPaymentsToMonth(existing, ledger.fixedPayments ?? [], now);
+  if (existing) return applyExpenseCategoriesToMonth(ledger, applyFixedPaymentsToMonth(existing, ledger.fixedPayments ?? [], now), now);
   if (![monthId(now), ...forecastMonthIds(now)].includes(id)) throw new Error('Choose the current month or one of the next four months.');
-  return applyFixedPaymentsToMonth(newMonth(id, ledger.payFrequency), ledger.fixedPayments ?? [], now);
+  return applyExpenseCategoriesToMonth(ledger, applyFixedPaymentsToMonth(newMonth(id, ledger.payFrequency), ledger.fixedPayments ?? [], now), now);
 }
 
 export function savePlanningMonth(ledger: Ledger, month: MonthlyBudget, now = new Date()): Ledger {
   const result = structuredClone(ledger), index = result.months.findIndex(value => value.id === month.id);
   if (index < 0) {
     if (![monthId(now), ...forecastMonthIds(now)].includes(month.id)) throw new Error('Choose one of the next four months.');
-    result.months.push(applyFixedPaymentsToMonth(month, ledger.fixedPayments ?? [], now));
-  } else result.months[index] = applyFixedPaymentsToMonth(month, ledger.fixedPayments ?? [], now);
+    result.months.push(applyExpenseCategoriesToMonth(ledger, applyFixedPaymentsToMonth(month, ledger.fixedPayments ?? [], now), now));
+  } else result.months[index] = applyExpenseCategoriesToMonth(ledger, applyFixedPaymentsToMonth(month, ledger.fixedPayments ?? [], now), now);
   // Check the complete ledger without replacing an in-progress entry such as
   // "3" or "3." with "3.00" after each keystroke. Encryption normalizes the
   // persisted representation separately.
@@ -53,10 +54,12 @@ export function copyCurrentPlanToForecast(ledger: Ledger, id: string, now = new 
   if (!source || !hasBudgetedPlan(source)) throw new Error('Enter the current month’s Budgeted plan before copying it.');
   const existing = input.months.find(month => month.id === id);
   if (existing && hasBudgetedPlan(existing, false)) throw new Error('This month already has a plan. Edit its amounts below.');
-  let copied = newMonth(id, source.paySchedule.frequency);
+  const active = new Set(activeExpenseCategories(input));
+  let copied = newMonth(id, source.paySchedule.frequency, input.expenseCategories === undefined ? undefined : [...active]);
   copied.periods.forEach((period, index) => {
     period.budgeted = structuredClone(source.periods[index].budgeted);
-    period.budgeted.expenses = period.budgeted.expenses.filter(entry => !entry.fixedPaymentId);
+    period.budgeted.expenses = period.budgeted.expenses.filter(entry => !entry.fixedPaymentId
+      && (input.expenseCategories === undefined || active.has(entry.name)));
     period.budgeted.expenses = period.budgeted.expenses.map(entry => ({ ...entry, id: crypto.randomUUID() }));
   });
   // Invalid paydays in shorter months are cleared for explicit selection.

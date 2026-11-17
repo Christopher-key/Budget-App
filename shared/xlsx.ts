@@ -1,5 +1,6 @@
 import type { BudgetPlan, Ledger, MonthlyBudget, ReportedExpense } from './contracts.js';
 import { MAX_MONEY_CENTS as MAX_CENTS, expenseCategories, monthId, monthSummary, moneyText, parseMoney, summary, transactionsIn, validateLedger, windows } from './model.js';
+import { monthExpenseCategories } from './categories.js';
 
 type Cell = { kind: 'text'; value: string } | { kind: 'money'; value: bigint } |
   { kind: 'number'; value: number } | null;
@@ -52,6 +53,17 @@ function groupedTransactions(transactions: ReportedExpense[]): Map<string, bigin
   return totals;
 }
 
+// Retired categories with recorded money remain part of the financial report.
+// Blank/zero retired inputs do not reintroduce a hidden category into new months.
+function reportCategories(month: MonthlyBudget): Set<string> {
+  const names = new Set(monthExpenseCategories(month));
+  for (const period of month.periods) for (const plan of [period.budgeted, period.realistic]) {
+    for (const entry of plan.expenses) if (amount(entry.amount) !== 0n) names.add(entry.name);
+  }
+  for (const transaction of month.transactions) names.add(transaction.category);
+  return names;
+}
+
 /** Creates a local report only. Does not transmit, persist, or mutate the ledger. */
 export function exportWorkbook(input: Ledger, options: WorkbookOptions): Uint8Array {
   const ledger = validateLedger(input);
@@ -86,6 +98,7 @@ export function exportWorkbook(input: Ledger, options: WorkbookOptions): Uint8Ar
   ]);
 
   for (const month of months) {
+    const visibleCategories = new Set(monthExpenseCategories(month));
     const budgeted = monthSummary(month, 'budgeted');
     const actual = monthSummary(month, 'realistic');
     const logged = month.transactions.reduce((total, transaction) => total + amount(transaction.amount), 0n);
@@ -118,7 +131,8 @@ export function exportWorkbook(input: Ledger, options: WorkbookOptions): Uint8Ar
             raw(entry.contribution), raw(entry.withdrawal), money(amount(entry.contribution) - amount(entry.withdrawal)),
           ]);
         }
-        const known = new Set([...plan.expenses.map(entry => entry.name), ...included.map(transaction => transaction.category)]);
+        const known = new Set([...plan.expenses.filter(entry => visibleCategories.has(entry.name) || amount(entry.amount) !== 0n)
+          .map(entry => entry.name), ...included.map(transaction => transaction.category)]);
         const names = [...expenseCategories.filter(name => known.has(name)), ...[...known].filter(name => !expenseCategories.includes(name)).sort()];
         for (const name of names) {
           const entries = plan.expenses.filter(entry => entry.name === name);
@@ -150,6 +164,7 @@ export function exportWorkbook(input: Ledger, options: WorkbookOptions): Uint8Ar
     ['Scope', 'Only selected months are included. Internal identifiers, global targets, account details, and all-time goal progress are omitted.'],
     ['Snapshot', 'Financial totals are calculated when exported. Editing this workbook does not recalculate them or update the app.'],
     ['CY layout', 'Projected is Budgeted; Actual is Realistic. Negative CY amounts are outflows. Other detail sheets show positive spending and deposits.'],
+    ['Expense categories', 'Each month keeps its own category labels. New and removed categories are blank in inapplicable month blocks; shared alignment rows can remain. Retired categories with recorded amounts remain visible and included in totals.'],
     ['CY savings', 'Savings withdrawals are explicitly recorded; no savings carryover or opening balance is inferred.'],
     ['CY comparison', 'Actual Left Over compares to the same period\'s Projected value: red below, green at or above. Untouched plans have no comparison coloring.'],
     ['Realistic expenses', 'Unlogged manual spending plus reported transactions, counted once. Detail sheets are breakdowns, not additional expenses.'],
@@ -170,14 +185,14 @@ function yearlySheets(months: MonthlyBudget[]): Sheet[] {
   return [...groups].sort(([a], [b]) => a.localeCompare(b)).map(([yearString, records]) => {
     const year = Number(yearString);
     const known = new Set<string>(expenseCategories);
-    const allNames = new Set(records.flatMap(month => month.periods.flatMap(period =>
-      [...period.realistic.expenses, ...period.budgeted.expenses].map(entry => entry.name)).concat(month.transactions.map(transaction => transaction.category))));
+    const allNames = new Set(records.flatMap(month => [...reportCategories(month)]));
     const extra = [...allNames].filter(name => !known.has(name)).sort();
-    const lines: [string, string | null][] = [
+    const possibleLines: [string, string | null][] = [
       ['Home / Rent', 'Home'], ['Car', 'Car'], ['Insurance', 'Insurance'], ['Phone', 'Phone'],
       ['Grocery / Food', 'Grocery'], ['Gas', 'Gas'], ['Electric', 'Electric'], ['Savings deposits', null],
       ['Credit Card', 'Credit Card'], ['Misc.', 'Misc.'], ['Going-out', 'Going-out'], ...extra.map(name => [name, name] as [string, string]),
     ];
+    const lines = possibleLines.filter(([, category]) => category === null || allNames.has(category));
     const totalRow = 6 + lines.length;
     const leftRow = totalRow + 1;
     const blocks = records.reduce((total, month) => total + windows(month).length, 0);
@@ -192,6 +207,7 @@ function yearlySheets(months: MonthlyBudget[]): Sheet[] {
     let block = 0;
     for (const month of records) {
       const name = monthNames[Number(month.id.slice(5, 7)) - 1]!;
+      const categoryNames = reportCategories(month);
       for (const window of windows(month)) {
         const col = block++ * 4;
         const set = (row: number, column: number, value: Cell): void => { result.rows[row]![column] = value; };
@@ -208,6 +224,7 @@ function yearlySheets(months: MonthlyBudget[]): Sheet[] {
           set(2, col + offset, raw(plan.payroll)); set(3, col + offset, raw(plan.extra)); set(4, col + offset, savingsCell(plan, true));
           const logged = groupedTransactions(included);
           for (const [index, [label, category]] of lines.entries()) {
+            if (category !== null && !categoryNames.has(category)) continue;
             set(6 + index, col + 2, text(label));
             if (category === null) { set(6 + index, col + offset, savingsCell(plan, false, true)); continue; }
             const entries = plan.expenses.filter(entry => entry.name === category);
