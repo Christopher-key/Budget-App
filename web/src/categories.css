@@ -4,7 +4,7 @@
 .expense-category-row > div { display: grid; gap: 6px; min-width: 0; }
 .expense-category-list strong, .expense-category-list small { overflow-wrap: anywhere; }
 .expense-category-list .secondary { flex-shrink: 0; padding: 8px 12px; font-size: .74rem; min-height: 36px; }
-.expense-records { padding: 14px 16px; background: #f5f7f6; border: 1px solid var(--line); border-radius: 9px; margin: 18px 0; }
+.expense-records { padding: 14px 16px; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 9px; margin: 18px 0; }
 .editor-card .expense-records h3 { border: 0; padding: 0; margin: 0 0 12px; }
 .expense-records dl { margin: 0; }
 .expense-records dl > div { display: flex; justify-content: space-between; gap: 12px; margin: 10px 0; font-size: .76rem; }

@@ -49,7 +49,7 @@ function fixture(gate?: SecurityGate) {
   return { repository, requests, fetcher };
 }
 
-test('a stale device cannot discard newly encrypted fixed-payment or category fields and reloads their complete plan', async () => {
+test('a stale device cannot discard newly encrypted payments, categories or appearance choices', async () => {
   const { fetcher } = fixture();
   const username = 'synthetic-payment-compatibility', password = 'Synthetic payment check password 2026!';
   const authA = await authenticate(config, username, password, true, fetcher);
@@ -64,10 +64,10 @@ test('a stale device cannot discard newly encrypted fixed-payment or category fi
     assert.equal(oldDocument.fixedPayments, undefined);
     assert.equal(oldDocument.expenseCategories, undefined);
     const paymentId = crypto.randomUUID();
-    first.edit(addExpenseCategory(saveFixedPayment(first.snapshot().ledger!, {
+    first.edit({ ...addExpenseCategory(saveFixedPayment(first.snapshot().ledger!, {
       id: paymentId, name: 'Synthetic car payment', category: 'Car', monthlyAmount: '300', dueDay: 20,
       startMonth: monthId(), endMonth: '', isApplied: true, payoffBalance: '1500', annualRate: '5', rateType: 'apr', history: [],
-    }), 'Synthetic veterinary'));
+    }), 'Synthetic veterinary'), animationsEnabled: false, darkModeEnabled: true });
     await first.flush();
     oldDocument.months[0]!.periods[0]!.realistic.extra = '12';
     second.edit(oldDocument); await second.flush();
@@ -77,6 +77,8 @@ test('a stale device cannot discard newly encrypted fixed-payment or category fi
     assert.equal(second.snapshot().ledger!.fixedPayments![0]!.id, paymentId);
     assert.equal(second.snapshot().ledger!.expenseCategories!.some(category => category.name === 'Synthetic veterinary' && category.isActive), true);
     assert.equal(second.snapshot().ledger!.months[0]!.expenseCategories!.includes('Synthetic veterinary'), true);
+    assert.equal(second.snapshot().ledger!.animationsEnabled, false);
+    assert.equal(second.snapshot().ledger!.darkModeEnabled, true);
     assert.equal(second.snapshot().ledger!.months[0]!.periods.flatMap(period => period.budgeted.expenses)
       .filter(entry => entry.fixedPaymentId === paymentId).length, 1);
   } finally { first.dispose(); second?.dispose(); }

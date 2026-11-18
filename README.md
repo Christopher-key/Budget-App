@@ -45,6 +45,11 @@ the active ones. Recorded amounts remain in totals when a category is removed.
 See [custom expense instructions](CUSTOM-EXPENSES.md) for history, transactions,
 fixed payments, and export behavior.
 
+**Settings → Appearance** provides account-controlled **Animations** and
+**Dark mode** switches. Home has a rotating sun by day and twinkling stars in
+the evening. See [appearance settings](APPEARANCE.md) for defaults, greeting
+times, privacy, and printing.
+
 The web account's third consecutive wrong app passcode erases its active encrypted
 budget, login credentials, wrapped encryption key, and grants. Account-password
 failures are throttled rather than triggering deletion. The native app remains

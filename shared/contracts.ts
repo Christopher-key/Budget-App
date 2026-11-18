@@ -38,6 +38,8 @@ export interface Ledger {
   payFrequency: PayFrequency; exportHistory: ExportAudit[];
   fixedPayments?: FixedPayment[];
   expenseCategories?: ExpenseCategory[];
+  animationsEnabled?: boolean;
+  darkModeEnabled?: boolean;
 }
 export interface AccountStatus { state: 'new' | 'locked' | 'erased'; epoch: number; accountId: string; revision?: number }
 export interface UnlockResponse { epoch: number; unlockToken: string; expiresAt: string }

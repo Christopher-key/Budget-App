@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { emptyLedger, newMonth } from '../../shared/model.js';
+import { emptyLedger, newMonth, validateLedger } from '../../shared/model.js';
 import { addExpenseCategory, monthExpenseCategories, setExpenseCategoryActive } from '../../shared/categories.js';
 import { saveFixedPayment, recordFixedPayment } from '../../shared/fixed-payments.js';
 import { createDataKey, decode, decryptLedger, encode, encryptLedger, passwordKeys, randomSalt, unwrapDataKey, validateBlob } from '../src/crypto.js';
@@ -8,6 +8,28 @@ import { createDataKey, decode, decryptLedger, encode, encryptLedger, passwordKe
 const accountId = encode(new Uint8Array(32).fill(7));
 const otherAccount = encode(new Uint8Array(32).fill(8));
 const password = 'a long synthetic password';
+
+test('account appearance preferences survive encrypted roundtrips while legacy ledgers retain their shape', async () => {
+  const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  const legacy = emptyLedger(new Date(2026, 10, 17, 12));
+  for (const ledger of [legacy, { ...legacy, animationsEnabled: false, darkModeEnabled: false }, { ...legacy, animationsEnabled: true, darkModeEnabled: true }]) {
+    const blob = await encryptLedger(key, accountId, 1, 1, ledger);
+    assert.doesNotMatch(JSON.stringify(blob), /animationsEnabled|darkModeEnabled/);
+    const restored = await decryptLedger(key, accountId, 1, 1, blob);
+    assert.deepEqual(restored, ledger);
+    assert.equal(Object.hasOwn(restored, 'animationsEnabled'), Object.hasOwn(ledger, 'animationsEnabled'));
+    assert.equal(Object.hasOwn(restored, 'darkModeEnabled'), Object.hasOwn(ledger, 'darkModeEnabled'));
+  }
+});
+
+test('appearance preferences require a boolean when present', () => {
+  const ledger = emptyLedger();
+  for (const preference of ['animationsEnabled', 'darkModeEnabled']) {
+    for (const value of [undefined, null, 0, 1, 'false', 'true', [], {}, new Boolean(false)]) {
+      assert.throws(() => validateLedger({ ...ledger, [preference]: value }), /Invalid budget data/);
+    }
+  }
+});
 
 test('custom categories and historical visibility survive encrypted roundtrips without exposing names', async () => {
   const now = new Date(2026, 10, 17, 12), key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);

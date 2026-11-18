@@ -1,0 +1,42 @@
+.page-heading.home-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: 16px;
+}
+.home-heading > div:first-child { min-width: 0; }
+.home-heading-details { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.sky-accent { position: relative; width: 80px; height: 80px; flex-shrink: 0; }
+.sky-illustration, .sky-illustration > svg { display: block; width: 100%; height: 100%; }
+.sky-day-wash { fill: var(--amber-wash, #fff4df); }
+.sky-night-wash { fill: var(--violet-wash, #f3effa); }
+.sky-sun { fill: var(--amber, #e8b35e); }
+.sky-sun-rays {
+  fill: none;
+  stroke: var(--amber, #e8b35e);
+  stroke-width: 2;
+  stroke-linecap: round;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.sky-accent[data-animated="true"] .sky-sun-rays { animation: sky-ray-turn 30s linear infinite; }
+.sky-sun-glint { fill: none; stroke: #fff4df; stroke-width: 2; stroke-linecap: round; }
+.sky-moon { fill: var(--violet, #65508b); }
+.sky-star { fill: var(--violet, #65508b); opacity: .75; }
+.sky-accent[data-animated="true"] .sky-star { animation: sky-star-twinkle 5s ease-in-out infinite; }
+.sky-star--second { fill: var(--green, #156b60); }
+.sky-accent[data-animated="true"] .sky-star--second { animation-delay: -1.8s; }
+.sky-accent[data-animated="true"] .sky-star--third { animation-delay: -3.4s; }
+.sky-horizon { fill: none; stroke: var(--green, #156b60); stroke-width: 1.5; stroke-linecap: round; opacity: .45; }
+.sky-accent[data-paused="true"] .sky-sun-rays,
+.sky-accent[data-paused="true"] .sky-star { animation-play-state: paused; }
+@keyframes sky-ray-turn { to { transform: rotate(360deg); } }
+@keyframes sky-star-twinkle { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+@media (max-width: 450px) {
+  .page-heading.home-heading { column-gap: 10px; }
+  .home-heading-details { gap: 6px; }
+  .sky-accent { width: 72px; height: 72px; }
+}
+@media print {
+  .sky-sun-rays, .sky-star { animation: none !important; }
+}

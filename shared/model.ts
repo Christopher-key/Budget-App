@@ -308,8 +308,10 @@ function validatePlan(value: unknown, bucketIds: Set<string> | undefined, fixedI
 
 /** Validate and normalize a detached copy. User ownership is never accepted in the document. */
 export function validateLedger(value: unknown): Ledger {
-  const root = object(value, ['schemaVersion', 'months', 'savingsBuckets', 'payFrequency', 'exportHistory', 'fixedPayments', 'expenseCategories']);
+  const root = object(value, ['schemaVersion', 'months', 'savingsBuckets', 'payFrequency', 'exportHistory', 'fixedPayments', 'expenseCategories', 'animationsEnabled', 'darkModeEnabled']);
   if (root.schemaVersion !== 1) fail();
+  if (Object.hasOwn(root, 'animationsEnabled') && typeof root.animationsEnabled !== 'boolean') fail();
+  if (Object.hasOwn(root, 'darkModeEnabled') && typeof root.darkModeEnabled !== 'boolean') fail();
   const categories: ExpenseCategory[] = array(root.expenseCategories, 100, true).map(value => {
     const category = object(value, ['name', 'isActive']);
     if (typeof category.isActive !== 'boolean') fail();
@@ -402,6 +404,8 @@ export function validateLedger(value: unknown): Ledger {
   // Preserve the exact legacy shape until the optional feature is used.
   if (root.fixedPayments !== undefined) result.fixedPayments = fixedPayments;
   if (root.expenseCategories !== undefined) result.expenseCategories = categories;
+  if (Object.hasOwn(root, 'animationsEnabled')) result.animationsEnabled = root.animationsEnabled as boolean;
+  if (Object.hasOwn(root, 'darkModeEnabled')) result.darkModeEnabled = root.darkModeEnabled as boolean;
   if (new TextEncoder().encode(JSON.stringify(result)).byteLength > MAX_LEDGER_BYTES) fail();
   return result;
 }
