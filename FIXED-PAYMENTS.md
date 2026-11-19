@@ -54,6 +54,9 @@ spending together; it is not a bank refund. Older linked history is read only.
 
 Older entries marked as tracker-only stay tracker-only. The app never generates
 spending from old history, since that spending may already have been reported.
+If tracker-only entries already exist this month, Apply requires confirmation
+that you are recording an additional payment. It does not link an old payment to
+spending or reverse the principal that was already recorded.
 
 ## Optional payoff and interest
 

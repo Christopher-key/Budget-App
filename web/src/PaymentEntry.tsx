@@ -24,9 +24,12 @@ export function PaymentExpenseDialog({ ledger, paymentId, monthID, update, onClo
   });
   const [error, setError] = useState('');
   const [undoing, setUndoing] = useState(false);
+  const [additionalPayment, setAdditionalPayment] = useState(false);
   const committing = useRef(false);
   const original = useRef(JSON.stringify(payment));
   const tracked = recorded ? recorded.kind !== 'recurring' : Boolean(payment?.payoffBalance.trim());
+  const legacyPayments = payment?.history.filter(item => !item.budgetMonth && item.date.slice(0, 7) === monthID) ?? [];
+  const needsConfirmation = !recorded && legacyPayments.length > 0;
   const manualAmount = ledger.months.find(month => month.id === monthID)?.periods
     .flatMap(period => period.realistic.expenses)
     .filter(entry => !entry.fixedPaymentId && entry.name === category)
@@ -59,6 +62,7 @@ export function PaymentExpenseDialog({ ledger, paymentId, monthID, update, onClo
   const blocked = recorded && recorded.kind !== 'recurring' && (latest?.id !== recorded.id || parseMoney(recorded.balanceAfter ?? '') !== parseMoney(payment.payoffBalance));
   const invalid = !paid.trim() || parseMoney(paid) === null || (parseMoney(paid) ?? 0n) <= 0n
     || date.slice(0, 7) !== monthID || date > dateText() || monthID !== monthId()
+    || (needsConfirmation && !additionalPayment)
     || (tracked && (!preview?.value || preview.value.chargedPayment !== parseMoney(paid)));
   function checkCurrent() {
     if (original.current !== JSON.stringify(payment)) throw new Error('This payment changed while the form was open. Close it and reopen the latest payment before continuing.');
@@ -105,6 +109,7 @@ export function PaymentExpenseDialog({ ledger, paymentId, monthID, update, onClo
         {preview?.value && preview.value.chargedPayment !== parseMoney(paid) && <p className="error">The amount exceeds the payoff balance plus interest. Enter the actual final payment of {formatMoney(preview.value.chargedPayment)}.</p>}
       </>}
       {(manualAmount > 0n || otherLogged > 0n) && <p className="privacy-note">{category} already has {formatMoney(manualAmount)} in manual Realistic amounts and {formatMoney(otherLogged)} in other reported expenses this month. If those include this payment, remove or adjust that amount to avoid counting it twice.</p>}
+      {needsConfirmation && <div className="privacy-note"><p>Existing tracker entries total {formatMoney(legacyPayments.reduce((sum, item) => sum + (parseMoney(item.amount) ?? 0n), 0n))} this month. Those payments already reduced the payoff balance. Applying here records an additional payment and expense; it does not connect an old entry to spending.</p><label className="check-row"><input type="checkbox" checked={additionalPayment} onChange={event => setAdditionalPayment(event.target.checked)}/>This is an additional payment, separate from the existing tracker entries.</label></div>}
       {blocked && <p className="error">A later tracker record or balance correction exists. This older payment cannot be changed or undone without diverging from the payoff tracker.</p>}
       <p className="muted small">The linked expense appears in Transactions and Realistic totals in the pay period containing its payment date. Saving again updates the same monthly payment.</p>
       {error && <p className="error" role="alert">{error}</p>}
