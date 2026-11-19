@@ -11,7 +11,7 @@ import { copyCurrentPlanToForecast, forecastMonthIds, forecastSummary, hasBudget
 import { LOCKDOWN_MESSAGE, SECURITY_UNAVAILABLE_MESSAGE } from '../../shared/security.js';
 import { SecurityMonitor } from './security.js';
 import { Money, Modal } from './controls.js';
-import { PaymentManager, PaymentPreview, FixedPlanLines } from './Payments.js';
+import { PaymentManager, PaymentPreview, FixedPaymentNotices, paymentNoticesForPeriod, type PaymentNotice } from './Payments.js';
 import { ExpenseCategoryManager } from './ExpenseCategories.js';
 import { TimeOfDayAccent, useGreetingHour } from './TimeOfDayAccent.js';
 import { AppearanceSettings } from './AppearanceSettings.js';
@@ -67,11 +67,47 @@ function PreviouslyRecordedExpenses({ plan, reported, categories }: { plan: Budg
     <p className="muted small">These amounts remain in your totals. Restore a removed category in Manage expenses to edit its unlogged amounts. Reported expenses can still be edited in Transactions.</p>
   </section>;
 }
-function PlanEditor({ title, plan, buckets, reported, onChange, monthID, categories }: { categories: string[]; monthID: string; title: string; plan: BudgetPlan; buckets: SavingsBucket[]; reported: ReportedExpense[]; onChange: (p: BudgetPlan) => void }) {
+function PlanEditor({ title, plan, buckets, reported, onChange, monthID, categories, ledger, update, notices }: {
+  categories: string[]; monthID: string; title: string; plan: BudgetPlan; buckets: SavingsBucket[]; reported: ReportedExpense[];
+  onChange: (p: BudgetPlan) => void; ledger: Ledger; update: (next: Ledger) => void; notices: PaymentNotice[];
+}) {
   const [withdraw, setWithdraw] = useState(false), [source, setSource] = useState('general'), [withdrawal, setWithdrawal] = useState('');
   const data = summary(plan, reported);
+  const manualExpenses = plan.expenses.filter(expense => !expense.fixedPaymentId && categories.includes(expense.name));
+  const extraCategories = [...new Set(notices.map(notice => notice.category))].filter(category => !manualExpenses.some(expense => expense.name === category));
   function choose(id: string) { setSource(id); setWithdrawal(id === 'general' ? plan.savingsWithdrawn : plan.bucketEntries.find(e => e.id === id)?.withdrawal ?? ''); }
-  return <section className={`card editor-card ${title === 'Budgeted' ? 'plan-budgeted' : 'plan-realistic'}`}><p className="eyebrow">{title}</p><h3>Income</h3><Money label="Payroll" value={plan.payroll} onChange={v => onChange({ ...plan, payroll: v })}/><Money label="Extra" value={plan.extra} onChange={v => onChange({ ...plan, extra: v })}/><h3>Expenses</h3>{plan.expenses.filter(expense => !expense.fixedPaymentId && categories.includes(expense.name)).map(expense => { const logged = reported.filter(t => t.category === expense.name).reduce((sum, t) => sum + amount(t.amount), 0n); return <div key={expense.id}>{title === 'Realistic' && logged > 0n && <small className="muted">{expense.name}: {formatMoney(logged)} logged separately</small>}<Money label={expense.name} value={expense.amount} onChange={v => onChange({ ...plan, expenses: plan.expenses.map(e => e.id === expense.id ? { ...e, amount: v } : e) })}/></div>; })}<PreviouslyRecordedExpenses plan={plan} reported={reported} categories={categories}/><FixedPlanLines plan={plan} monthID={monthID}/><h3>Savings</h3><Money label="Set aside" value={plan.savings} onChange={v => onChange({ ...plan, savings: v })}/>{buckets.filter(b => b.isActive).map(bucket => <Money key={bucket.id} label={bucket.name} value={plan.bucketEntries.find(e => e.id === bucket.id)?.contribution ?? ''} onChange={v => onChange(BucketAmount(plan, bucket, 'contribution', v))}/>)}{buckets.some(b => b.isActive) && <small className="muted">Bucket contributions are additional to Set aside.</small>}{plan.bucketEntries.filter(entry => !buckets.some(b => b.id === entry.id && b.isActive) && entry.contribution.trim()).map(entry => <div className="archived-contribution" key={entry.id}><span>{buckets.find(b => b.id === entry.id)?.name ?? entry.name} <small>(archived)</small></span><strong>{formatMoney(amount(entry.contribution))}</strong></div>)}<button className="withdraw-control" onClick={() => { choose(plan.savingsWithdrawn && amount(plan.savingsWithdrawn) !== 0n ? 'general' : plan.bucketEntries.find(e => amount(e.withdrawal) !== 0n)?.id ?? 'general'); setWithdraw(true); }}><span>Pull from savings</span><strong>{formatMoney(data.withdrawn)} →</strong></button><div className="editor-total"><span>Remaining</span><strong>{formatMoney(data.remaining)}</strong></div>{withdraw && <Modal title="Pull from savings" onClose={() => setWithdraw(false)}><label className="field">Source<select aria-label="Source" value={source} onChange={e => choose(e.target.value)}><option value="general">Set aside (general)</option>{buckets.map(b => <option key={b.id} value={b.id}>{b.name}{b.isActive ? '' : ' (inactive)'}</option>)}</select></label><Money label="Total pulled this pay period" value={withdrawal} onChange={setWithdrawal}/><p className="muted small">Each location keeps its own period total. Clearing the old location and entering the correct one changes an earlier withdrawal’s location. {title === 'Realistic' ? 'Bucket withdrawals reduce saved progress.' : 'Budgeted amounts are plans.'}</p><button className="primary full" disabled={parseMoney(withdrawal) === null} onClick={() => { if (source === 'general') onChange({ ...plan, savingsWithdrawn: withdrawal }); else { const bucket = buckets.find(b => b.id === source); if (bucket) onChange(BucketAmount(plan, bucket, 'withdrawal', withdrawal)); } setWithdraw(false); }}>Save withdrawal total</button></Modal>}</section>;
+  return <section className={`card editor-card ${title === 'Budgeted' ? 'plan-budgeted' : 'plan-realistic'}`}>
+    <p className="eyebrow">{title}</p><h3>Income</h3>
+    <Money label="Payroll" value={plan.payroll} onChange={v => onChange({ ...plan, payroll: v })}/>
+    <Money label="Extra" value={plan.extra} onChange={v => onChange({ ...plan, extra: v })}/>
+    <h3>Expenses</h3>
+    {manualExpenses.map(expense => {
+      const logged = reported.filter(t => t.category === expense.name).reduce((sum, t) => sum + amount(t.amount), 0n);
+      return <div className="expense-category-line" key={expense.id}>
+        {title === 'Realistic' && logged > 0n && <small className="muted">{expense.name}: {formatMoney(logged)} logged separately</small>}
+        <Money label={expense.name} value={expense.amount} onChange={v => onChange({ ...plan, expenses: plan.expenses.map(e => e.id === expense.id ? { ...e, amount: v } : e) })}/>
+        <FixedPaymentNotices ledger={ledger} monthID={monthID} notices={notices} category={expense.name} budgeted={title === 'Budgeted'} update={update}/>
+      </div>;
+    })}
+    {extraCategories.map(category => <div className="expense-category-line retained-fixed-category" key={category}>
+      <p className="small"><strong>{category}</strong> <span className="muted">· saved fixed payment</span></p>
+      <FixedPaymentNotices ledger={ledger} monthID={monthID} notices={notices} category={category} budgeted={title === 'Budgeted'} update={update}/>
+    </div>)}
+    <PreviouslyRecordedExpenses plan={plan} reported={reported} categories={categories}/>
+    <h3>Savings</h3>
+    <Money label="Set aside" value={plan.savings} onChange={v => onChange({ ...plan, savings: v })}/>
+    {buckets.filter(b => b.isActive).map(bucket => <Money key={bucket.id} label={bucket.name} value={plan.bucketEntries.find(e => e.id === bucket.id)?.contribution ?? ''} onChange={v => onChange(BucketAmount(plan, bucket, 'contribution', v))}/>)}
+    {buckets.some(b => b.isActive) && <small className="muted">Bucket contributions are additional to Set aside.</small>}
+    {plan.bucketEntries.filter(entry => !buckets.some(b => b.id === entry.id && b.isActive) && entry.contribution.trim()).map(entry => <div className="archived-contribution" key={entry.id}><span>{buckets.find(b => b.id === entry.id)?.name ?? entry.name} <small>(archived)</small></span><strong>{formatMoney(amount(entry.contribution))}</strong></div>)}
+    <button className="withdraw-control" onClick={() => { choose(plan.savingsWithdrawn && amount(plan.savingsWithdrawn) !== 0n ? 'general' : plan.bucketEntries.find(e => amount(e.withdrawal) !== 0n)?.id ?? 'general'); setWithdraw(true); }}><span>Pull from savings</span><strong>{formatMoney(data.withdrawn)} →</strong></button>
+    <div className="editor-total"><span>Remaining</span><strong>{formatMoney(data.remaining)}</strong></div>
+    {withdraw && <Modal title="Pull from savings" onClose={() => setWithdraw(false)}>
+      <label className="field">Source<select aria-label="Source" value={source} onChange={e => choose(e.target.value)}><option value="general">Set aside (general)</option>{buckets.map(b => <option key={b.id} value={b.id}>{b.name}{b.isActive ? '' : ' (inactive)'}</option>)}</select></label>
+      <Money label="Total pulled this pay period" value={withdrawal} onChange={setWithdrawal}/>
+      <p className="muted small">Each location keeps its own period total. Clearing the old location and entering the correct one changes an earlier withdrawal’s location. {title === 'Realistic' ? 'Bucket withdrawals reduce saved progress.' : 'Budgeted amounts are plans.'}</p>
+      <button className="primary full" disabled={parseMoney(withdrawal) === null} onClick={() => { if (source === 'general') onChange({ ...plan, savingsWithdrawn: withdrawal }); else { const bucket = buckets.find(b => b.id === source); if (bucket) onChange(BucketAmount(plan, bucket, 'withdrawal', withdrawal)); } setWithdraw(false); }}>Save withdrawal total</button>
+    </Modal>}
+  </section>;
 }
 function ForecastPanel({ ledger, select }: { ledger: Ledger; select: (id: string) => void }) {
   const rows = forecastSummary(ledger);
@@ -107,20 +143,22 @@ function Budget({ ledger, update }: { ledger: Ledger; update: (l: Ledger) => voi
     try { update(copyCurrentPlanToForecast(ledger, month.id)); setError(""); }
     catch (failure) { setError(failure instanceof Error ? failure.message : "This plan could not be copied."); }
   };
+  const notices = paymentNoticesForPeriod(ledger, month, window.index);
+  const actualNotices = notices.map(notice => ({ ...notice, category: notice.actualCategory }));
   return <><PageHeading title="Make a plan" subtitle="Give each pay period a little direction."><ExpenseCategoryManager ledger={ledger} update={update}/></PageHeading>
     <ForecastPanel ledger={ledger} select={choose}/>
     <div className="section-heading"><select aria-label="Budget month" value={month.id} onChange={event => choose(event.target.value)}>
       {choices.map(id => <option key={id} value={id}>{fullMonth(id)}{id > monthId() ? " · Forecast" : ""}</option>)}
     </select><div className="segmented" role="group" aria-label="Pay period">{all.map(value => <button key={value.index} aria-pressed={window.index === value.index} className={window.index === value.index ? "selected" : ""} onClick={() => select(value.index)}>Days {value.title}</button>)}</div></div>
     {isFuture ? <section className="card"><div className="section-heading"><h2>{fullMonth(month.id)} forecast</h2>
-      {!hasBudgetedPlan(month, false) && <button className="primary" onClick={copy} disabled={!hasBudgetedPlan(currentMonth(ledger))}>Copy current Budgeted plan</button>}</div>
+      {!hasBudgetedPlan(month) && <button className="primary" onClick={copy} disabled={!hasBudgetedPlan(currentMonth(ledger))}>Copy current Budgeted plan</button>}</div>
       <p className="muted small">Enter expected income, expenses and savings below. Copying keeps actual spending and transactions empty. Set this month's pay dates before relying on its period breakdown.</p>
     </section> : <p className="muted small">Realistic expenses include these unlogged amounts plus your reported transactions. Avoid entering the same purchase twice.</p>}
     {error && <p className="error" role="alert">{error}</p>}
     {isFuture && <details key={month.id}><summary>Forecast pay dates</summary><Schedule ledger={ledger} update={update} monthID={month.id}/></details>}
     <div className={isFuture ? undefined : "two-columns"}>
-      {!isFuture && <PlanEditor key={month.id + "-" + window.title + "-realistic"} monthID={month.id} categories={categories} title="Realistic" plan={period.realistic} buckets={ledger.savingsBuckets} reported={transactionsIn(month, window)} onChange={plan => change("realistic", plan)}/>}
-      <PlanEditor key={month.id + "-" + window.title + "-budgeted"} monthID={month.id} categories={categories} title="Budgeted" plan={period.budgeted} buckets={ledger.savingsBuckets} reported={[]} onChange={plan => change("budgeted", plan)}/>
+      {!isFuture && <PlanEditor key={month.id + "-" + window.title + "-realistic"} monthID={month.id} categories={categories} title="Realistic" ledger={ledger} update={update} notices={actualNotices} plan={period.realistic} buckets={ledger.savingsBuckets} reported={transactionsIn(month, window)} onChange={plan => change("realistic", plan)}/>}
+      <PlanEditor key={month.id + "-" + window.title + "-budgeted"} monthID={month.id} categories={categories} title="Budgeted" ledger={ledger} update={update} notices={notices} plan={period.budgeted} buckets={ledger.savingsBuckets} reported={[]} onChange={plan => change("budgeted", plan)}/>
     </div></>;
 }
 function PageHeading({ title, subtitle, children }: { title: string; subtitle: string; children?: React.ReactNode }) { return <div className="page-heading"><div><p className="eyebrow">Your money, with a plan</p><h1>{title}</h1><p className="muted">{subtitle}</p></div>{children}</div>; }
@@ -142,6 +180,7 @@ function Transactions({ ledger, update }: { ledger: Ledger; update: (l: Ledger) 
   const draftCategories = draft ? categoriesFor(draft.date, draft.id) : [];
   function save(event: React.FormEvent) {
     event.preventDefault(); if (!draft) return;
+    if (draft.fixedPaymentId) { setError('Edit or undo this linked payment in Savings & Payoffs to keep its expense and tracker together.'); return; }
     try {
       const date = new Date(draft.date + 'T12:00:00'), id = monthId(date);
       if (!Number.isFinite(date.getTime()) || localDate(date) !== draft.date || draft.date > localDate()
@@ -161,12 +200,13 @@ function Transactions({ ledger, update }: { ledger: Ledger; update: (l: Ledger) 
       {[...ledger.months].sort((a, b) => b.id.localeCompare(a.id)).map(value => <option key={value.id} value={value.id}>{fullMonth(value.id)}</option>)}
     </select><strong>{formatMoney(month.transactions.reduce((sum, transaction) => sum + amount(transaction.amount), 0n))} logged</strong></div>
       {[...month.transactions].sort((a, b) => b.dayOfMonth - a.dayOfMonth).map(transaction => <div className="transaction" key={transaction.id}>
-        <button className="transaction-main" onClick={() => { setError(''); setDraft({ ...transaction, date: `${month.id}-${String(transaction.dayOfMonth).padStart(2, '0')}` }); }}>
-          <span className="transaction-symbol">↗</span><span><strong>{transaction.category}</strong><small>{`${month.id}-${String(transaction.dayOfMonth).padStart(2, '0')}`}{transaction.note ? ` · ${transaction.note}` : ''}</small></span><strong>{formatMoney(amount(transaction.amount))}</strong>
-        </button><button className="icon-button muted" aria-label={`Delete ${transaction.category} transaction`} onClick={() => { if (confirm('Delete this reported expense?')) update({ ...ledger, months: ledger.months.map(value => ({ ...value, transactions: value.transactions.filter(item => item.id !== transaction.id) })) }); }}>×</button>
+        <button className="transaction-main" onClick={() => { if (transaction.fixedPaymentId) { setError('This expense is linked to a fixed payment. Edit or undo it in Savings & Payoffs to keep the expense and payment history together.'); return; } setError(''); setDraft({ ...transaction, date: `${month.id}-${String(transaction.dayOfMonth).padStart(2, '0')}` }); }}>
+          <span className="transaction-symbol">↗</span><span><strong>{transaction.category}</strong><small>{`${month.id}-${String(transaction.dayOfMonth).padStart(2, '0')}`}{transaction.note ? ` · ${transaction.note}` : ''}{transaction.fixedPaymentId ? ' · Linked fixed payment' : ''}</small></span><strong>{formatMoney(amount(transaction.amount))}</strong>
+        </button><button className="icon-button muted" aria-label={transaction.fixedPaymentId ? `Linked ${transaction.category} payment: edit or undo in Savings & Payoffs` : `Delete ${transaction.category} transaction`} onClick={() => { if (transaction.fixedPaymentId) { setError('This expense is linked to a fixed payment. Use Undo this payment in Savings & Payoffs to remove the expense and restore the tracker together.'); return; } if (confirm('Delete this reported expense?')) update({ ...ledger, months: ledger.months.map(value => ({ ...value, transactions: value.transactions.filter(item => item.id !== transaction.id) })) }); }}>{transaction.fixedPaymentId ? '↗' : '×'}</button>
       </div>)}
       {!month.transactions.length && <Empty title="A fresh page" text="Report a purchase when you’re ready. It will count toward Realistic spending."/>}
     </section>
+    {error && !draft && <p className="error" role="alert">{error}</p>}
     {draft && <Modal title="Report an expense" onClose={() => setDraft(null)}><form onSubmit={save}>
       <label className="field">Date<input aria-label="Expense date" type="date" required max={localDate()} value={draft.date} onChange={event => {
         const categories = categoriesFor(event.target.value, draft.id);
@@ -429,7 +469,7 @@ function ConnectedApp({ config }: { config: PublicConfig }) {
   return <>{service.phase !== 'open' && <main className="entry-shell"><section className="entry-card">
     <div className="brand-mark">B</div><p className="eyebrow">Your private budget</p>
     <h1>{service.phase === 'locked' ? 'Unscheduled Maintenance' : service.phase === 'checking' ? 'Checking availability' : 'Service temporarily unavailable'}</h1>
-    <p role="status" className="muted">{service.phase === 'locked' ? LOCKDOWN_MESSAGE : service.phase === 'checking' ? 'Please wait while we check service availability.' : SECURITY_UNAVAILABLE_MESSAGE}</p>
+    <p role="status" className="muted">{service.phase === 'locked' ? LOCKDOWN_MESSAGE : service.phase === 'checking' ? 'Checking service availability. This can take a few moments; you do not need to refresh.' : SECURITY_UNAVAILABLE_MESSAGE}</p>
     {service.phase !== 'checking' && <button className="primary full" onClick={() => { if (config.securityGateRequired) void security.check(); else window.location.reload(); }}>Check again</button>}
   </section></main>}
   {session ? <div hidden={service.phase !== 'open'}><BudgetApp session={session} signOut={signOut}/></div>

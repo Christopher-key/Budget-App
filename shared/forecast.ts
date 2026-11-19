@@ -1,5 +1,5 @@
 import type { BudgetPlan, Ledger, MonthlyBudget, PayFrequency } from './contracts.js';
-import { applySchedule, daysInMonth, monthId, monthSummary, newMonth, validateLedger } from './model.js';
+import { applySchedule, daysInMonth, monthId, monthSummary, newMonth, validateLedger, windows } from './model.js';
 import { applyFixedPaymentsToMonth } from './fixed-payments.js';
 import { activeExpenseCategories, applyExpenseCategoriesToMonth } from './categories.js';
 
@@ -53,13 +53,16 @@ export function copyCurrentPlanToForecast(ledger: Ledger, id: string, now = new 
   const input = validateLedger(ledger), source = input.months.find(month => month.id === monthId(now));
   if (!source || !hasBudgetedPlan(source)) throw new Error('Enter the current month’s Budgeted plan before copying it.');
   const existing = input.months.find(month => month.id === id);
-  if (existing && hasBudgetedPlan(existing, false)) throw new Error('This month already has a plan. Edit its amounts below.');
+  if (existing && hasBudgetedPlan(existing)) throw new Error('This month already has a plan. Edit its amounts below.');
   const active = new Set(activeExpenseCategories(input));
+  const eligibleFixed = new Set((input.fixedPayments ?? []).filter(payment => payment.isApplied && payment.startMonth <= id
+    && (!payment.endMonth || id <= payment.endMonth) && active.has(payment.category)).map(payment => payment.id));
   let copied = newMonth(id, source.paySchedule.frequency, input.expenseCategories === undefined ? undefined : [...active]);
   copied.periods.forEach((period, index) => {
     period.budgeted = structuredClone(source.periods[index].budgeted);
-    period.budgeted.expenses = period.budgeted.expenses.filter(entry => !entry.fixedPaymentId
-      && (input.expenseCategories === undefined || active.has(entry.name)));
+    period.budgeted.expenses = period.budgeted.expenses.filter(entry => entry.fixedPaymentId
+      ? eligibleFixed.has(entry.fixedPaymentId) && active.has(entry.name)
+      : input.expenseCategories === undefined || active.has(entry.name));
     period.budgeted.expenses = period.budgeted.expenses.map(entry => ({ ...entry, id: crypto.randomUUID() }));
   });
   // Invalid paydays in shorter months are cleared for explicit selection.
@@ -74,16 +77,28 @@ export function copyCurrentPlanToForecast(ledger: Ledger, id: string, now = new 
     }
     const target = structuredClone(existing);
     target.periods = target.periods.map((period, index) => ({ ...period, budgeted: copied.periods[index].budgeted }));
+    relocateFixedEntries(target);
     return savePlanningMonth(input, target, now);
   }
+  relocateFixedEntries(copied);
   return savePlanningMonth(input, copied, now);
+}
+
+function relocateFixedEntries(month: MonthlyBudget): void {
+  const entries = month.periods.flatMap(period => period.budgeted.expenses.filter(entry => entry.fixedPaymentId));
+  for (const period of month.periods) period.budgeted.expenses = period.budgeted.expenses.filter(entry => !entry.fixedPaymentId);
+  const periods = windows(month);
+  for (const entry of entries) {
+    const day = Math.min(entry.fixedDueDay!, daysInMonth(month.id));
+    const period = periods.find(value => day >= value.startDay && day <= value.endDay)!;
+    month.periods[period.index]!.budgeted.expenses.push(entry);
+  }
 }
 
 export function forecastSummary(ledger: Ledger, now = new Date()) {
   return forecastMonthIds(now).map(id => {
     let month = ledger.months.find(value => value.id === id);
-    const hasFixed = (ledger.fixedPayments ?? []).some(payment => payment.isApplied && payment.startMonth <= id && (!payment.endMonth || id <= payment.endMonth));
-    if (!month && !hasFixed) return { id, planned: false, income: 0n, expenses: 0n, savings: 0n, withdrawn: 0n, remaining: 0n };
+    if (!month) return { id, planned: false, income: 0n, expenses: 0n, savings: 0n, withdrawn: 0n, remaining: 0n };
     month = planningMonth(ledger, id, now);
     return { id, planned: hasBudgetedPlan(month), ...monthSummary(month, 'budgeted') };
   });

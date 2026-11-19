@@ -12,7 +12,7 @@ import type { Ledger } from '../shared/contracts.js';
 import type { SecurityGate } from '../shared/security.js';
 import { ApiError } from '../api/src/types.js';
 import { SecurityMonitor } from '../web/src/security.js';
-import { saveFixedPayment } from '../shared/fixed-payments.js';
+import { saveFixedPayment, setFixedPaymentBudget, recordFixedPaymentExpense } from '../shared/fixed-payments.js';
 import { monthId } from '../shared/model.js';
 import { addExpenseCategory } from '../shared/categories.js';
 
@@ -64,10 +64,15 @@ test('a stale device cannot discard newly encrypted payments, categories or appe
     assert.equal(oldDocument.fixedPayments, undefined);
     assert.equal(oldDocument.expenseCategories, undefined);
     const paymentId = crypto.randomUUID();
-    first.edit({ ...addExpenseCategory(saveFixedPayment(first.snapshot().ledger!, {
+    let edited = saveFixedPayment(first.snapshot().ledger!, {
       id: paymentId, name: 'Synthetic car payment', category: 'Car', monthlyAmount: '300', dueDay: 20,
       startMonth: monthId(), endMonth: '', isApplied: true, payoffBalance: '1500', annualRate: '5', rateType: 'apr', history: [],
-    }), 'Synthetic veterinary'), animationsEnabled: false, darkModeEnabled: true });
+    });
+    edited = setFixedPaymentBudget(edited, paymentId, monthId(), '300');
+    edited = recordFixedPaymentExpense(edited, paymentId, {
+      monthID: monthId(), date: monthId() + '-' + String(new Date().getDate()).padStart(2, '0'), amount: '200', interest: '6.25',
+    });
+    first.edit({ ...addExpenseCategory(edited, 'Synthetic veterinary'), animationsEnabled: false, darkModeEnabled: true });
     await first.flush();
     oldDocument.months[0]!.periods[0]!.realistic.extra = '12';
     second.edit(oldDocument); await second.flush();
@@ -79,6 +84,11 @@ test('a stale device cannot discard newly encrypted payments, categories or appe
     assert.equal(second.snapshot().ledger!.months[0]!.expenseCategories!.includes('Synthetic veterinary'), true);
     assert.equal(second.snapshot().ledger!.animationsEnabled, false);
     assert.equal(second.snapshot().ledger!.darkModeEnabled, true);
+    const linked = second.snapshot().ledger!.months[0]!.transactions.filter(transaction => transaction.fixedPaymentId === paymentId);
+    assert.equal(linked.length, 1);
+    assert.equal(linked[0]!.amount, '200.00');
+    assert.equal(second.snapshot().ledger!.fixedPayments![0]!.history[0]!.id, linked[0]!.id);
+    assert.equal(second.snapshot().ledger!.fixedPayments![0]!.payoffBalance, '1306.25');
     assert.equal(second.snapshot().ledger!.months[0]!.periods.flatMap(period => period.budgeted.expenses)
       .filter(entry => entry.fixedPaymentId === paymentId).length, 1);
   } finally { first.dispose(); second?.dispose(); }

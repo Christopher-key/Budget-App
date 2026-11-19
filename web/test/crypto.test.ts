@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { emptyLedger, newMonth, validateLedger } from '../../shared/model.js';
+import { emptyLedger, monthSummary, newMonth, validateLedger } from '../../shared/model.js';
 import { addExpenseCategory, monthExpenseCategories, setExpenseCategoryActive } from '../../shared/categories.js';
-import { saveFixedPayment, recordFixedPayment } from '../../shared/fixed-payments.js';
+import { saveFixedPayment, recordFixedPayment, recordFixedPaymentExpense, setFixedPaymentBudget, undoFixedPaymentExpense } from '../../shared/fixed-payments.js';
 import { createDataKey, decode, decryptLedger, encode, encryptLedger, passwordKeys, randomSalt, unwrapDataKey, validateBlob } from '../src/crypto.js';
 
 const accountId = encode(new Uint8Array(32).fill(7));
@@ -54,6 +54,7 @@ test('optional fixed-payment definitions, payoff history and plan snapshots surv
     id: crypto.randomUUID(), name: 'Synthetic payoff', category: 'Car', monthlyAmount: '100', dueDay: 31,
     startMonth: '2026-11', endMonth: '', isApplied: true, payoffBalance: '1000', annualRate: '12', rateType: 'apr', history: [],
   }, now);
+  ledger = setFixedPaymentBudget(ledger, ledger.fixedPayments![0]!.id, '2026-11', '100', now);
   ledger = recordFixedPayment(ledger, ledger.fixedPayments![0]!.id, '100', now);
   const blob = await encryptLedger(key, accountId, 2, 7, ledger);
   assert.doesNotMatch(JSON.stringify(blob), /Synthetic payoff|payoffBalance|monthlyAmount|fixedPaymentId/);
@@ -62,6 +63,34 @@ test('optional fixed-payment definitions, payoff history and plan snapshots surv
   assert.equal(restored.fixedPayments![0]!.payoffBalance, '910.00');
   assert.equal(restored.fixedPayments![0]!.history.length, 1);
   assert.equal(restored.months[0]!.periods.flatMap(period => period.budgeted.expenses).filter(entry => entry.fixedPaymentId).length, 1);
+});
+
+test('linked actual payments and recurring records stay coherent through encryption, correction and undo', async () => {
+  const now = new Date(2026, 10, 17, 12), key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  const loanId = crypto.randomUUID(), policyId = crypto.randomUUID();
+  let ledger = saveFixedPayment(emptyLedger(now), {
+    id: loanId, name: 'Synthetic linked loan', category: 'Car', monthlyAmount: '100', dueDay: 20,
+    startMonth: '2026-11', endMonth: '', isApplied: true, payoffBalance: '1000', annualRate: '12', rateType: 'apr', history: [],
+  }, now);
+  ledger = saveFixedPayment(ledger, {
+    id: policyId, name: 'Synthetic policy', category: 'Insurance', monthlyAmount: '90', dueDay: 1,
+    startMonth: '2026-11', endMonth: '', isApplied: true, payoffBalance: '', annualRate: '0', rateType: 'apr', history: [],
+  }, now);
+  ledger = recordFixedPaymentExpense(ledger, loanId, { monthID: '2026-11', date: '2026-11-17', amount: '100', interest: '10' }, now);
+  ledger = recordFixedPaymentExpense(ledger, policyId, { monthID: '2026-11', date: '2026-11-17', amount: '90' }, now);
+  ledger = recordFixedPaymentExpense(ledger, loanId, { monthID: '2026-11', date: '2026-11-17', amount: '120', interest: '10' }, now);
+  const blob = await encryptLedger(key, accountId, 4, 8, ledger);
+  assert.doesNotMatch(JSON.stringify(blob), /Synthetic linked loan|fixedPaymentId|budgetMonth/);
+  const restored = await decryptLedger(key, accountId, 4, 8, blob);
+  assert.deepEqual(restored, ledger);
+  assert.equal(restored.months[0]!.transactions.length, 2);
+  assert.equal(monthSummary(restored.months[0]!, 'realistic').expenses, 21000n);
+  for (const transaction of restored.months[0]!.transactions) {
+    assert.equal(restored.fixedPayments!.find(payment => payment.id === transaction.fixedPaymentId)!.history[0]!.id, transaction.id);
+  }
+  const reversed = undoFixedPaymentExpense(restored, loanId, '2026-11', now);
+  assert.equal(reversed.fixedPayments!.find(payment => payment.id === loanId)!.payoffBalance, '1000.00');
+  assert.equal(monthSummary(reversed.months[0]!, 'realistic').expenses, 9000n);
 });
 
 test('slow password derivation is repeatable and wrapped data keys require the correct password and account', async () => {

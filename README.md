@@ -32,12 +32,13 @@ assumes a fixed balance and equal monthly periods; account terms and daily
 balances affect actual payments. Calculator entries stay in page memory and do
 not create income entries or alter saved savings. No API update is required.
 
-The website's tab is now **Savings & Payoffs**. Its **+ Fixed payment** button
-adds optional loans, car payments, leases and insurance costs to Home and
-Budgeted plans only when applied. Optional payoff balances and APR/APY inputs
-show estimated payments remaining; self-reported payoff payments update the
-tracker separately from Realistic spending. See [fixed-payment instructions](FIXED-PAYMENTS.md)
-for allocation, overlap, history, interest assumptions and privacy details.
+The website's **Savings & Payoffs → + Fixed payment** stores loan, lease and
+insurance reminders with optional payoff balances and APR/APY estimates. Both
+Budgeted and actual payment amounts are manual. Controls beside each expense
+category let you use the suggested amount or enter your own. Recording an actual
+payment updates Realistic spending and the payment tracker together, once.
+See [fixed-payment instructions](FIXED-PAYMENTS.md) for corrections, retained
+earlier plans, interest assumptions and privacy details.
 
 **Budget → Manage expenses** adds, removes, or restores expense categories.
 Historical months retain their category lists, while current/future budgets use

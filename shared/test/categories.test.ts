@@ -5,7 +5,7 @@ import { activeExpenseCategories, addExpenseCategory, applyExpenseCategoriesToMo
   monthExpenseCategories, setExpenseCategoryActive } from '../categories.js';
 import { applySchedule, emptyLedger, expenseCategories, monthSummary, newMonth, validateLedger } from '../model.js';
 import { copyCurrentPlanToForecast, planningMonth, savePlanningMonth } from '../forecast.js';
-import { saveFixedPayment, setFixedPaymentApplied } from '../fixed-payments.js';
+import { saveFixedPayment, setFixedPaymentApplied, setFixedPaymentBudget } from '../fixed-payments.js';
 
 const now = new Date(2026, 10, 17, 12);
 
@@ -68,6 +68,8 @@ test('custom categories can hold self-reported transactions and fixed monthly pa
   const payment: FixedPayment = { id: crypto.randomUUID(), name: 'Synthetic loan', category: 'Student loan', monthlyAmount: '100',
     dueDay: 20, startMonth: '2026-11', endMonth: '', isApplied: true, payoffBalance: '', annualRate: '0', rateType: 'apr', history: [] };
   ledger = saveFixedPayment(ledger, payment, now);
+  assert.equal(monthSummary(ledger.months[0]!, 'budgeted').expenses, 0n);
+  ledger = setFixedPaymentBudget(ledger, payment.id, '2026-11', '100', now);
   ledger.months[0]!.transactions.push({ id: crypto.randomUUID(), date: now.toISOString(), dayOfMonth: 17, category: 'Student loan', amount: '40', note: '' });
   assert.doesNotThrow(() => validateLedger(ledger));
   assert.equal(monthSummary(ledger.months[0]!, 'budgeted').expenses, 10000n);

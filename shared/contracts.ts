@@ -13,6 +13,7 @@ export interface BudgetPlan {
 export interface PeriodBudget { realistic: BudgetPlan; budgeted: BudgetPlan }
 export interface ReportedExpense {
   id: string; date: string; dayOfMonth: number; category: string; amount: string; note: string;
+  fixedPaymentId?: string;
 }
 export interface MonthlyBudget {
   id: string; date: string; periods: PeriodBudget[];
@@ -22,7 +23,10 @@ export interface MonthlyBudget {
 export interface ExpenseCategory { name: string; isActive: boolean }
 export interface SavingsBucket { id: string; name: string; target: string; isActive: boolean }
 export interface FixedPaymentRecord {
-  id: string; date: string; amount: string; interest: string; principal: string; balanceAfter: string;
+  id: string; date: string; amount: string;
+  // Legacy records without budgetMonth update only the payoff tracker.
+  budgetMonth?: string; kind?: 'recurring'; previousEndMonth?: string;
+  interest?: string; principal?: string; balanceAfter?: string;
 }
 export interface FixedPayment {
   id: string; name: string; category: string; monthlyAmount: string; dueDay: number;

@@ -1,6 +1,6 @@
 import type {
   BudgetPlan, BucketEntry, ExpenseEntry, ExportAudit, Ledger, MonthlyBudget,
-  PayFrequency, PeriodBudget, ReportedExpense, SavingsBucket, FixedPayment, ExpenseCategory,
+  PayFrequency, PeriodBudget, ReportedExpense, SavingsBucket, FixedPayment, FixedPaymentRecord, ExpenseCategory,
 } from './contracts.js';
 import { annualRateText, parseAnnualRate } from './rates.js';
 
@@ -321,6 +321,7 @@ export function validateLedger(value: unknown): Ledger {
   const knownCategories = new Set([...expenseCategories, ...categories.map(category => category.name)]);
   let paymentHistoryCount = 0;
   const recordIds = new Set<string>();
+  const linkedRecords = new Map<string, { paymentId: string; record: FixedPaymentRecord }>();
   const fixedPayments: FixedPayment[] = array(root.fixedPayments, 200, true).map(value => {
     const payment = object(value, ['id', 'name', 'category', 'monthlyAmount', 'dueDay', 'startMonth', 'endMonth',
       'isApplied', 'payoffBalance', 'annualRate', 'rateType', 'history']);
@@ -332,17 +333,42 @@ export function validateLedger(value: unknown): Ledger {
         typeof payment.startMonth !== 'string' || typeof payment.endMonth !== 'string') fail();
     parts(payment.startMonth);
     if (payment.endMonth) { parts(payment.endMonth); if (payment.endMonth < payment.startMonth) fail(); }
-    const history = array(payment.history, 1000, true).map(value => {
+    const paymentId = id(payment.id), paidMonths = new Set<string>();
+    const history: FixedPaymentRecord[] = array(payment.history, 1000, true).map(value => {
       if (++paymentHistoryCount > 1000) fail();
-      const record = object(value, ['id', 'date', 'amount', 'interest', 'principal', 'balanceAfter']);
+      const record = object(value, ['id', 'date', 'amount', 'interest', 'principal', 'balanceAfter', 'kind', 'budgetMonth', 'previousEndMonth']);
       const recordId = id(record.id);
       if (recordIds.has(recordId)) fail();
       recordIds.add(recordId);
-      const paid = money(record.amount), interest = money(record.interest), principal = money(record.principal), balanceAfter = money(record.balanceAfter);
-      if (!paid || !interest || !principal || !balanceAfter || amount(paid) <= 0n || amount(principal) <= 0n || amount(paid) !== amount(interest) + amount(principal)) fail();
-      return { id: recordId, date: isoDate(record.date), amount: paid, interest, principal, balanceAfter };
+      const paid = money(record.amount), result: FixedPaymentRecord = { id: recordId, date: isoDate(record.date), amount: paid };
+      if (!paid || amount(paid) <= 0n) fail();
+      if (record.budgetMonth !== undefined) {
+        if (typeof record.budgetMonth !== 'string') fail();
+        parts(record.budgetMonth);
+        if (paidMonths.has(record.budgetMonth) || result.date.slice(0, 7) !== record.budgetMonth) fail();
+        paidMonths.add(record.budgetMonth);
+        result.budgetMonth = record.budgetMonth;
+      }
+      if (record.kind === 'recurring') {
+        if (!result.budgetMonth || record.interest !== undefined || record.principal !== undefined ||
+            record.balanceAfter !== undefined || record.previousEndMonth !== undefined) fail();
+        result.kind = 'recurring';
+      } else {
+        if (record.kind !== undefined) fail();
+        const interest = money(record.interest), principal = money(record.principal), balanceAfter = money(record.balanceAfter);
+        if (!interest || !principal || !balanceAfter || (!result.budgetMonth && amount(principal) <= 0n) ||
+            amount(paid) !== amount(interest) + amount(principal)) fail();
+        result.interest = interest; result.principal = principal; result.balanceAfter = balanceAfter;
+        if (record.previousEndMonth !== undefined) {
+          if (!result.budgetMonth || amount(balanceAfter) !== 0n || typeof record.previousEndMonth !== 'string') fail();
+          if (record.previousEndMonth) parts(record.previousEndMonth);
+          result.previousEndMonth = record.previousEndMonth;
+        }
+      }
+      if (result.budgetMonth) linkedRecords.set(recordId, { paymentId, record: result });
+      return result;
     });
-    return { id: id(payment.id), name: name(payment.name, 60), category: payment.category, monthlyAmount,
+    return { id: paymentId, name: name(payment.name, 60), category: payment.category, monthlyAmount,
       dueDay: integer(payment.dueDay, 1, 31), startMonth: payment.startMonth, endMonth: payment.endMonth,
       isApplied: payment.isApplied, payoffBalance, annualRate: annualRateText(rate), rateType: payment.rateType, history };
   });
@@ -360,6 +386,7 @@ export function validateLedger(value: unknown): Ledger {
   const bucketIds = new Set(savingsBuckets.map(bucket => bucket.id));
   let transactionCount = 0;
   const transactionIds = new Set<string>();
+  const linkedTransactionIds = new Set<string>();
   const months: MonthlyBudget[] = array(root.months, 1200).map(value => {
     const month = object(value, ['id', 'date', 'periods', 'paySchedule', 'transactions', 'expenseCategories']);
     if (typeof month.id !== 'string') fail();
@@ -377,18 +404,28 @@ export function validateLedger(value: unknown): Ledger {
     if (new Set(managedIds).size !== managedIds.length) fail();
     const transactions: ReportedExpense[] = array(month.transactions, 10_000, true).map(value => {
       if (++transactionCount > 10_000) fail();
-      const tx = object(value, ['id', 'date', 'dayOfMonth', 'category', 'amount', 'note']);
+      const tx = object(value, ['id', 'date', 'dayOfMonth', 'category', 'amount', 'note', 'fixedPaymentId']);
       const txId = id(tx.id);
       if (transactionIds.has(txId)) fail();
       transactionIds.add(txId);
       const txAmount = money(tx.amount);
       if (amount(txAmount) <= 0n || (tx.note !== undefined && (typeof tx.note !== 'string' || tx.note.length > 4000))) fail();
-      return { id: txId, date: isoDate(tx.date), dayOfMonth: integer(tx.dayOfMonth, 1, daysInMonth(identifier)),
+      const result: ReportedExpense = { id: txId, date: isoDate(tx.date), dayOfMonth: integer(tx.dayOfMonth, 1, daysInMonth(identifier)),
         category: name(tx.category), amount: txAmount, note: (tx.note ?? '') as string };
+      const linked = linkedRecords.get(txId);
+      if (tx.fixedPaymentId !== undefined) {
+        result.fixedPaymentId = id(tx.fixedPaymentId);
+        if (!linked || linked.paymentId !== result.fixedPaymentId || linked.record.budgetMonth !== identifier ||
+            linked.record.date !== result.date || linked.record.amount !== result.amount ||
+            result.dayOfMonth !== Number(result.date.slice(8, 10))) fail();
+        linkedTransactionIds.add(txId);
+      } else if (linked) fail();
+      return result;
     });
     return { id: identifier, date: isoDate(month.date), periods, paySchedule, transactions, ...(names === undefined ? {} : { expenseCategories: names }) };
   });
   unique(months, month => month.id);
+  if (linkedTransactionIds.size !== linkedRecords.size) fail();
   const exportHistory: ExportAudit[] = array(root.exportHistory, 1000, true).map(value => {
     const audit = object(value, ['id', 'createdAt', 'monthIds', 'status']);
     if (audit.status !== 'downloadRequested') fail();

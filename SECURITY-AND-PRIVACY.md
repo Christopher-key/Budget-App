@@ -131,6 +131,13 @@ It can lock the control and stop the budget Function App; it has no permission
 to start that app. This provides an independent stop operation even if a change
 to the budget API were to ignore its software gate.
 
+The browser's first availability check can retry temporary startup failures in
+a bounded chain: three five-second attempts with one- and two-second delays,
+at most eighteen seconds. The page remains in a checking state with access
+denied until a valid open status is verified. Explicit lockdown is shown
+immediately. Runtime failures after startup still deny access immediately;
+this retry does not create an offline login or bypass the security gate.
+
 Automatic lockdown is optional and rejects requests until its trusted alert
 source is configured. The alert adapter requires authenticated, approved security
 alerts; public password failures and ordinary metric alerts do not trigger a

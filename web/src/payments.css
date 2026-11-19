@@ -29,13 +29,17 @@
 .payment-preview-row > div > strong { overflow-wrap: anywhere; }
 .payment-preview-row > strong { text-align: right; white-space: nowrap; }
 .payment-preview-row > strong small { display: block; font-size: .68rem; font-weight: 400; margin-top: 5px; }
-.fixed-plan-lines { border-top: 1px solid var(--line); padding-top: 20px; margin-top: 21px; }
-.fixed-plan-lines dl { margin: 0 0 14px; font-size: .78rem; }
-.fixed-plan-lines dl > div { display: flex; justify-content: space-between; gap: 15px; margin: 14px 0; }
-.fixed-plan-lines dt { display: grid; gap: 5px; min-width: 0; }
-.fixed-plan-lines dt strong { font-weight: 550; overflow-wrap: anywhere; }
-.fixed-plan-lines dt small { font-size: .67rem; color: var(--muted); }
-.fixed-plan-lines dd { margin: 0; white-space: nowrap; font-weight: 600; }
+.fixed-payment-notices { display: grid; gap: 9px; margin: 0 0 18px; }
+.fixed-payment-notice { border: 1px solid var(--line); border-radius: 9px; background: var(--violet-wash); padding: 12px; min-width: 0; }
+.fixed-payment-notice-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 5px 12px; font-size: .74rem; }
+.fixed-payment-notice-heading strong { overflow-wrap: anywhere; }
+.fixed-payment-notice-heading > span { font-size: .67rem; }
+.fixed-payment-notice p { margin: 8px 0; overflow-wrap: anywhere; }
+.fixed-payment-notice .secondary { padding: 7px 11px; min-height: 36px; font-size: .72rem; }
+.fixed-payment-notice > small { display: block; line-height: 1.6; }
+.retained-fixed-category > p { margin: 14px 0 9px; }
+.payment-scheduled { display: block; margin: -10px 0 18px; text-align: left; font-size: .76rem; }
+.payment-undo { display: block; width: 100%; margin-top: 13px; }
 @media (max-width: 600px) {
   .payment-manager .section-heading { flex-wrap: wrap; }
   .payment-row { padding: 15px; }
@@ -46,4 +50,5 @@
   .payment-payoff > div:first-child { flex-wrap: wrap; }
   .payment-preview-row { gap: 12px; }
   .payment-preview-row > strong { white-space: normal; }
+  .fixed-payment-notice { padding: 11px; }
 }

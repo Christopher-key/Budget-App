@@ -11,6 +11,46 @@ export class ServiceSecurityError extends Error {
   }
 }
 
+class TransientStatusFailure extends Error {}
+const transientStatusCodes = new Set([502, 503, 504]);
+
+/** Settle independently of fetch, because some adapters do not settle after abort. */
+function readStatus(fetcher: typeof fetch, url: string, signal: AbortSignal, onTimeout: () => void): Promise<{ response: Response; text: string }> {
+  return new Promise((resolve, reject) => {
+    const attempt = new AbortController();
+    let settled = false, timeout: ReturnType<typeof setTimeout> | undefined;
+    const finish = (error?: Error, reply?: { response: Response; text: string }) => {
+      if (settled) return;
+      settled = true; clearTimeout(timeout); signal.removeEventListener('abort', cancel);
+      if (error) reject(error); else resolve(reply!);
+    };
+    const cancel = () => { finish(new Error('Status check cancelled')); attempt.abort(); };
+    signal.addEventListener('abort', cancel, { once: true });
+    if (signal.aborted) { cancel(); return; }
+    timeout = setTimeout(() => {
+      finish(new TransientStatusFailure()); attempt.abort(); onTimeout();
+    }, 5_000);
+    void (async () => {
+      try {
+        const response = await fetcher(url, {
+          method: 'GET', credentials: 'omit', cache: 'no-store', redirect: 'error', signal: attempt.signal,
+          headers: { Accept: 'application/json' },
+        });
+        finish(undefined, { response, text: await response.text() });
+      } catch { finish(new TransientStatusFailure()); }
+    })();
+  });
+}
+
+function waitForRetry(signal: AbortSignal, milliseconds: number): Promise<void> {
+  return new Promise(resolve => {
+    const finish = () => { clearTimeout(timeout); signal.removeEventListener('abort', finish); resolve(); };
+    const timeout = setTimeout(finish, milliseconds);
+    signal.addEventListener('abort', finish, { once: true });
+    if (signal.aborted) finish();
+  });
+}
+
 /** Only this small public document is accepted. Incident details never reach the app. */
 export function validateServiceStatus(value: unknown): PublicServiceStatus {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ServiceSecurityError('SECURITY_STATE_UNAVAILABLE');
@@ -31,6 +71,7 @@ export class SecurityMonitor {
   private highestGeneration = -1;
   private lockedGeneration = -1;
   private stopped = false;
+  private startupPending = true;
   constructor(private config: SecurityConfig, private fetcher: typeof fetch = fetch.bind(globalThis)) {
     this.state = { phase: config.securityGateRequired ? 'checking' : 'open', generation: null, version: 0 };
   }
@@ -61,6 +102,7 @@ export class SecurityMonitor {
   reportFailure(code: unknown) {
     if (!isServiceFailure(code)) return;
     // A reply already in flight cannot undo an API denial with an older open status.
+    this.startupPending = false;
     this.requestVersion++; this.request?.abort(); this.request = undefined;
     this.publish(code === 'SERVICE_LOCKED' ? 'locked' : 'unavailable');
   }
@@ -74,32 +116,53 @@ export class SecurityMonitor {
     if (this.stopped || !this.config.securityGateRequired || !this.config.securityStatusUrl || this.request) return;
     const controller = new AbortController(), version = ++this.requestVersion;
     this.request = controller;
-    const timeout = setTimeout(() => {
-      if (version !== this.requestVersion || this.stopped) return;
-      this.requestVersion++; this.request = undefined; controller.abort();
-      // Deny immediately even if an adapter fails to settle an aborted fetch.
-      this.publish('unavailable');
-    }, 5_000);
+    // One initial chain has at most three 5s attempts and 1s/2s delays (18s total).
+    // Its single request slot also prevents the normal poll from overlapping retries.
+    const retries = this.startupPending ? 2 : 0;
+    const active = () => version === this.requestVersion && !this.stopped && !controller.signal.aborted;
     try {
-      const response = await this.fetcher(this.config.securityStatusUrl, {
-        method: 'GET', credentials: 'omit', cache: 'no-store', redirect: 'error', signal: controller.signal,
-        headers: { Accept: 'application/json' },
-      });
-      const text = await response.text();
-      if (text.length > 1_024) throw new ServiceSecurityError('SECURITY_STATE_UNAVAILABLE');
-      const status = validateServiceStatus(JSON.parse(text));
-      if (controller.signal.aborted || version !== this.requestVersion || this.stopped) return;
-      if (status.generation < this.highestGeneration) throw new ServiceSecurityError('SECURITY_STATE_UNAVAILABLE');
-      if (status.state !== 'unavailable' && status.generation < 1) throw new ServiceSecurityError('SECURITY_STATE_UNAVAILABLE');
-      if (status.state === 'open' && status.generation <= this.lockedGeneration) throw new ServiceSecurityError('SECURITY_STATE_UNAVAILABLE');
-      if (status.state === 'locked') this.lockedGeneration = status.generation;
-      this.highestGeneration = status.generation;
-      if (!response.ok && status.state !== 'unavailable') throw new ServiceSecurityError('SECURITY_STATE_UNAVAILABLE');
-      this.publish(status.state, status.generation);
-    } catch {
-      if (version === this.requestVersion && !this.stopped) this.publish('unavailable');
+      for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+          const { response, text } = await readStatus(this.fetcher, this.config.securityStatusUrl, controller.signal, () => {
+            if (!active() || attempt < retries) return;
+            // Runtime checks and exhausted startup checks deny at the deadline itself.
+            this.startupPending = false; this.requestVersion++; this.request = undefined;
+            this.publish('unavailable');
+          });
+          if (!active()) return;
+          if (text.length > 1_024) throw new ServiceSecurityError('SECURITY_STATE_UNAVAILABLE');
+          let status: PublicServiceStatus;
+          try {
+            status = validateServiceStatus(JSON.parse(text));
+          } catch (error) {
+            // Gateways can return HTML/empty bodies while the public controller starts.
+            if (transientStatusCodes.has(response.status)) throw new TransientStatusFailure();
+            throw error;
+          }
+          if (status.generation < this.highestGeneration) throw new ServiceSecurityError('SECURITY_STATE_UNAVAILABLE');
+          if (status.state !== 'unavailable' && status.generation < 1) throw new ServiceSecurityError('SECURITY_STATE_UNAVAILABLE');
+          if (status.state === 'open' && status.generation <= this.lockedGeneration) throw new ServiceSecurityError('SECURITY_STATE_UNAVAILABLE');
+          if (status.state === 'locked') this.lockedGeneration = status.generation;
+          this.highestGeneration = status.generation;
+          if (!response.ok && status.state !== 'unavailable') throw new ServiceSecurityError('SECURITY_STATE_UNAVAILABLE');
+          if (status.state === 'unavailable' && attempt < retries && (response.ok || transientStatusCodes.has(response.status))) {
+            // Keep generation=null while startup is unverified so even allowChecking operations stay denied.
+            throw new TransientStatusFailure();
+          }
+          this.startupPending = false;
+          this.publish(status.state, status.generation);
+          return;
+        } catch (error) {
+          if (!active()) return;
+          if (!(error instanceof TransientStatusFailure) || attempt === retries) {
+            this.startupPending = false; this.publish('unavailable'); return;
+          }
+          await waitForRetry(controller.signal, (attempt + 1) * 1_000);
+          if (!active()) return;
+        }
+      }
     } finally {
-      clearTimeout(timeout); if (this.request === controller) this.request = undefined;
+      if (this.request === controller) this.request = undefined;
     }
   }
   start(page: Pick<Document, 'hidden' | 'addEventListener' | 'removeEventListener'> = document) {

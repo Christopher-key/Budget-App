@@ -9,7 +9,7 @@ import type { FixedPayment, Ledger, MonthlyBudget } from '../contracts.js';
 import { applySchedule, emptyLedger, monthSummary, newMonth, parseMoney, validateLedger } from '../model.js';
 import { copyCurrentPlanToForecast, planningMonth, savePlanningMonth } from '../forecast.js';
 import { appliedFixedPayments, applyFixedPaymentsToMonth, recordFixedPayment,
-  saveFixedPayment, setFixedPaymentApplied } from '../fixed-payments.js';
+  saveFixedPayment, setFixedPaymentApplied, setFixedPaymentBudget } from '../fixed-payments.js';
 import { exportWorkbook } from '../xlsx.js';
 
 const NOW = new Date(2026, 10, 17, 12);
@@ -33,7 +33,7 @@ function fixture(): Ledger {
 
 const managed = (month: MonthlyBudget) => month.periods.flatMap(period =>
   period.budgeted.expenses.filter(entry => entry.fixedPaymentId));
-const cents = (value: string) => parseMoney(value)!;
+const cents = (value: string | undefined) => parseMoney(value!)!;
 
 test('legacy encrypted-ledger content remains valid without introducing fixed-payment fields', () => {
   const ledger = emptyLedger(NOW);
@@ -50,9 +50,9 @@ test('unapplied definitions stay out of Home selection and every Budgeted expens
   assert.equal(monthSummary(ledger.months[0]!, 'budgeted').expenses, 5000n);
 });
 
-test('fixed payments are allocated once to the due-date period with exact monthly totals', () => {
+test('manual fixed-payment budgets are allocated once to the due-date period with exact monthly totals', () => {
   const original = fixture(), before = structuredClone(original);
-  const saved = saveFixedPayment(original, payment(), NOW);
+  const saved = setFixedPaymentBudget(saveFixedPayment(original, payment(), NOW), PAYMENT_ID, '2026-11', '300', NOW);
   const current = saved.months[0]!;
   assert.equal(managed(current).length, 1);
   assert.equal(current.periods[0]!.budgeted.expenses.some(entry => entry.fixedPaymentId), false);
@@ -70,7 +70,8 @@ test('fixed payments are allocated once to the due-date period with exact monthl
 
 test('day 31 clamps to February month end and schedule changes relocate rather than merge fixed costs', () => {
   const now = new Date(2028, 1, 4, 12), definition = payment({ dueDay: 31, startMonth: '2028-02' });
-  const first = applyFixedPaymentsToMonth(newMonth('2028-02', 'weekly'), [definition], now);
+  const input = emptyLedger(now); input.months = [newMonth('2028-02', 'weekly')];
+  const first = setFixedPaymentBudget(saveFixedPayment(input, definition, now), PAYMENT_ID, '2028-02', '300', now).months[0]!;
   assert.equal(first.periods[3]!.budgeted.expenses.filter(entry => entry.fixedPaymentId).length, 1);
   const monthly = applySchedule(first, { frequency: 'monthly', days: [1] });
   assert.equal(managed(monthly).length, 1);
@@ -92,25 +93,31 @@ test('start/end months control application and a missing current month is prepar
   assert.equal(appliedFixedPayments(ledger, '2026-11').length, 0);
   assert.equal(appliedFixedPayments(ledger, '2026-12').length, 1);
   assert.equal(appliedFixedPayments(ledger, '2027-01').length, 0);
-  assert.equal(managed(ledger.months.find(month => month.id === '2026-12')!).length, 1);
+  assert.equal(managed(ledger.months.find(month => month.id === '2026-12')!).length, 0);
 });
 
-test('edits and unapplying affect current/future plans while historical snapshots and actual records survive', () => {
+test('definition edits and unapplying preserve all manually entered snapshots and actual records', () => {
   const definition = payment({ startMonth: '2026-10' });
-  const prior = applyFixedPaymentsToMonth(newMonth('2026-10'), [definition], new Date(2026, 9, 17, 12));
-  const ledger = fixture(); ledger.months.unshift(prior); ledger.fixedPayments = [definition];
-  const first = saveFixedPayment(ledger, definition, NOW), historical = structuredClone(first.months[0]);
-  const changed = saveFixedPayment(first, { ...definition, name: 'Updated synthetic payment', monthlyAmount: '450', dueDay: 5 }, NOW);
-  assert.deepEqual(changed.months[0], historical);
+  const priorInput = emptyLedger(new Date(2026, 9, 17, 12));
+  const prior = setFixedPaymentBudget(saveFixedPayment(priorInput, definition, new Date(2026, 9, 17, 12)),
+    PAYMENT_ID, '2026-10', '300', new Date(2026, 9, 17, 12)).months[0]!;
+  let ledger = fixture(); ledger.months.unshift(prior); ledger.fixedPayments = [definition];
+  ledger = setFixedPaymentBudget(ledger, PAYMENT_ID, '2026-11', '300', NOW);
+  ledger = setFixedPaymentBudget(ledger, PAYMENT_ID, '2026-12', '275', NOW);
+  const snapshots = structuredClone(ledger.months);
+  const changed = saveFixedPayment(ledger, { ...definition, name: 'Updated synthetic payment', monthlyAmount: '450', dueDay: 5 }, NOW);
+  assert.deepEqual(changed.months, snapshots);
   const current = changed.months.find(month => month.id === '2026-11')!;
-  assert.equal(current.periods[0]!.budgeted.expenses.find(entry => entry.fixedPaymentId)!.fixedPaymentName,
-    'Updated synthetic payment');
-  assert.equal(monthSummary(current, 'budgeted').expenses, 50000n);
+  assert.equal(current.periods[1]!.budgeted.expenses.find(entry => entry.fixedPaymentId)!.fixedPaymentName,
+    'Synthetic car payment');
+  assert.equal(monthSummary(current, 'budgeted').expenses, 35000n);
   assert.equal(monthSummary(current, 'realistic').expenses, 700n);
   const off = setFixedPaymentApplied(changed, PAYMENT_ID, false, NOW);
-  assert.deepEqual(off.months[0], historical);
-  assert.ok(off.months.filter(month => month.id >= '2026-11').every(month => managed(month).length === 0));
+  assert.deepEqual(off.months, snapshots);
   assert.equal(appliedFixedPayments(off, '2026-11').length, 0);
+  const edited = setFixedPaymentBudget(off, PAYMENT_ID, '2026-11', '250', NOW);
+  assert.equal(monthSummary(edited.months.find(month => month.id === '2026-11')!, 'budgeted').expenses, 30000n);
+  assert.equal(managed(setFixedPaymentBudget(edited, PAYMENT_ID, '2026-11', '0', NOW).months.find(month => month.id === '2026-11')!).length, 0);
 });
 
 test('recording a payoff payment updates only the payoff tracker with interest-aware remaining balance', () => {
@@ -128,8 +135,10 @@ test('recording a payoff payment updates only the payoff tracker with interest-a
   assert.equal(ledger.fixedPayments![0]!.history.length, 0);
 });
 
-test('final payoff caps the payment, keeps this month planned, and stops future applied payments', () => {
-  const ledger = saveFixedPayment(fixture(), payment({ monthlyAmount: '100', payoffBalance: '50', annualRate: '12' }), NOW);
+test('legacy tracker payoff keeps every entered plan while stopping future reminders', () => {
+  let ledger = saveFixedPayment(fixture(), payment({ monthlyAmount: '100', payoffBalance: '50', annualRate: '12' }), NOW);
+  ledger = setFixedPaymentBudget(ledger, PAYMENT_ID, '2026-11', '100', NOW);
+  ledger = setFixedPaymentBudget(ledger, PAYMENT_ID, '2026-12', '100', NOW);
   const recorded = recordFixedPayment(ledger, PAYMENT_ID, '100', NOW);
   const value = recorded.fixedPayments![0]!;
   assert.equal(cents(value.payoffBalance), 0n);
@@ -137,7 +146,7 @@ test('final payoff caps the payment, keeps this month planned, and stops future 
   assert.equal(cents(value.history[0]!.principal), 5000n);
   assert.equal(value.endMonth, '2026-11');
   assert.equal(managed(recorded.months.find(month => month.id === '2026-11')!).length, 1);
-  assert.equal(managed(recorded.months.find(month => month.id === '2026-12')!).length, 0);
+  assert.equal(managed(recorded.months.find(month => month.id === '2026-12')!).length, 1);
   assert.equal(appliedFixedPayments(recorded, '2026-12').length, 0);
   assert.ok(recorded.months.every(month => month.transactions.length === 0));
 });
@@ -191,7 +200,7 @@ test('strict ledger validation rejects invalid definitions and linked expense me
     assert.throws(() => validateLedger(input), JSON.stringify(overrides));
   }
   assert.throws(() => validateLedger({ ...base, fixedPayments: [payment(), payment()] }));
-  const valid = saveFixedPayment(base, payment(), NOW);
+  const valid = setFixedPaymentBudget(saveFixedPayment(base, payment(), NOW), PAYMENT_ID, '2026-11', '300', NOW);
   for (const change of ['realistic', 'missing-reference', 'partial-metadata', 'duplicate-monthly-line'] as const) {
     const value = structuredClone(valid), current = value.months[0]!, entry = structuredClone(managed(current)[0]!);
     if (change === 'realistic') current.periods[0]!.realistic.expenses.push(entry);
@@ -209,8 +218,8 @@ test('strict ledger validation rejects invalid definitions and linked expense me
   assert.throws(() => validateLedger({ ...base, fixedPayments: [prototype] }));
 });
 
-test('forecast copy retains one current managed payment and preserves raw manual typing', () => {
-  const ledger = saveFixedPayment(fixture(), payment(), NOW);
+test('explicit forecast copy retains one manually entered fixed payment and preserves raw manual typing', () => {
+  const ledger = setFixedPaymentBudget(saveFixedPayment(fixture(), payment(), NOW), PAYMENT_ID, '2026-11', '300', NOW);
   const copied = copyCurrentPlanToForecast(ledger, '2026-12', NOW);
   const future = copied.months.find(month => month.id === '2026-12')!;
   assert.equal(managed(future).length, 1);
@@ -225,7 +234,7 @@ test('forecast copy retains one current managed payment and preserves raw manual
 });
 
 test('Excel category and monthly totals include applied payments exactly once without exporting private linkage IDs', () => {
-  const ledger = saveFixedPayment(fixture(), payment(), NOW), before = structuredClone(ledger);
+  const ledger = setFixedPaymentBudget(saveFixedPayment(fixture(), payment(), NOW), PAYMENT_ID, '2026-11', '300', NOW), before = structuredClone(ledger);
   const bytes = exportWorkbook(ledger, { monthIds: ['2026-11'], includeNotes: false, createdAt: NOW });
   const directory = mkdtempSync(join(tmpdir(), 'budget-fixed-payment-export-'));
   try {
