@@ -278,17 +278,72 @@ function SavingsInterestCalculator({ buckets, balances }: { buckets: SavingsBuck
 
 function Goals({ ledger, update }: { ledger: Ledger; update: (l: Ledger) => void }) {
   const [draft, setDraft] = useState<SavingsBucket | null>(null), [error, setError] = useState('');
+  const [showArchived, setShowArchived] = useState(false), [message, setMessage] = useState('');
+  const archiveID = React.useId();
   const balances = bucketBalances(ledger);
-  const open = (bucket?: SavingsBucket) => { setError(''); setDraft(bucket ? { ...bucket } : { id: uuid(), name: '', target: '', isActive: true }); };
+  const active = ledger.savingsBuckets.filter(bucket => bucket.isActive);
+  const archived = ledger.savingsBuckets.filter(bucket => !bucket.isActive);
+  const open = (bucket?: SavingsBucket) => { setError(''); setMessage(''); setDraft(bucket ? { ...bucket } : { id: uuid(), name: '', target: '', isActive: true }); };
+  function setActive(bucket: SavingsBucket, isActive: boolean) {
+    update({ ...ledger, savingsBuckets: ledger.savingsBuckets.map(value => value.id === bucket.id ? { ...value, isActive } : value) });
+    if (!isActive || archived.length === 1) setShowArchived(false);
+    setMessage(isActive ? `${bucket.name} restored to active savings plans.` : `${bucket.name} archived. View or restore it in Archived plans.`);
+  }
   function save(event: React.FormEvent) {
     event.preventDefault(); if (!draft) return;
     if (!draft.name.trim() || [...draft.name.trim()].length > 60 || /[\p{Cc}\p{Cf}]/u.test(draft.name)) { setError('Use a name of 1–60 characters.'); return; }
     if (parseMoney(draft.target) === null || amount(draft.target) <= 0n) { setError('Enter a positive target amount.'); return; }
     if (ledger.savingsBuckets.some(b => b.id !== draft.id && b.name.trim().toLocaleLowerCase('en-US') === draft.name.trim().toLocaleLowerCase('en-US'))) { setError('A goal with that name already exists.'); return; }
     const next = { ...ledger, savingsBuckets: [...ledger.savingsBuckets.filter(b => b.id !== draft.id), { ...draft, name: draft.name.trim() }] };
-    try { validateLedger(next); update(next); setDraft(null); } catch { setError('Check the goal name and target amount.'); }
+    try {
+      validateLedger(next); update(next); setDraft(null);
+      if (!draft.isActive) setShowArchived(false);
+      setMessage(draft.isActive ? 'Savings plan saved.' : 'Savings plan archived. View or restore it in Archived plans.');
+    } catch { setError('Check the goal name and target amount.'); }
   }
-  return <><PageHeading title="Savings &amp; Payoffs" subtitle="Build savings and plan your fixed monthly payments."><button className="primary" onClick={() => open()}>+ New goal</button></PageHeading><PaymentManager ledger={ledger} update={update}/><section className="card"><div className="section-heading"><h2>Your savings buckets</h2><span className="muted small">{ledger.savingsBuckets.filter(b => b.isActive).length} active</span></div><p className="muted small">Add actual contributions in Budget to build your progress. These are your recorded allocations, not verified bank balances.</p><div className="goal-list">{ledger.savingsBuckets.map(bucket => { const balance = balances.get(bucket.id) ?? 0n, target = amount(bucket.target), percent = Math.max(0, Math.min(100, Number(balance * 100n / target))); return <div className={`goal-row ${bucket.isActive ? '' : 'archived'}`} key={bucket.id}><div className="goal-icon" aria-hidden="true">{bucket.name.toLowerCase().includes('car') ? '↗' : '◎'}</div><button className="goal-copy" onClick={() => open(bucket)}><strong>{bucket.name}{!bucket.isActive && <small>Archived</small>}</strong><span className={balance < 0n ? 'negative' : ''}>{formatMoney(balance)} <span className="muted">/ {formatMoney(target)}</span></span><progress className="goal-progress" max="100" value={percent} aria-label={`${bucket.name}: ${Math.round(percent)} percent saved`}/></button><div className="goal-actions"><button className="text-button" onClick={() => open(bucket)}>Edit</button><button className="text-button" onClick={() => update({ ...ledger, savingsBuckets: ledger.savingsBuckets.map(b => b.id === bucket.id ? { ...b, isActive: !b.isActive } : b) })}>{bucket.isActive ? 'Archive' : 'Reactivate'}</button></div></div>; })}</div>{!ledger.savingsBuckets.length && <Empty title="Dream a little" text="A car, a holiday, a rainy day. Create a goal and start with your next pay period."/>}</section><p className="footer-note">Archiving keeps every contribution and withdrawal. You can still pull from an archived goal in Budget.</p><SavingsInterestCalculator buckets={ledger.savingsBuckets} balances={balances}/>{draft && <Modal title={ledger.savingsBuckets.some(b => b.id === draft.id) ? 'Edit savings goal' : 'New savings goal'} onClose={() => setDraft(null)}><form onSubmit={save}><label className="field">Goal name<input required maxLength={60} placeholder="A new car" value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })}/></label><Money label="Target" value={draft.target} onChange={target => setDraft({ ...draft, target })}/><label className="check-row"><input type="checkbox" checked={draft.isActive} onChange={e => setDraft({ ...draft, isActive: e.target.checked })}/>Active goal</label>{error && <p className="error" role="alert">{error}</p>}<button className="primary full" disabled={!draft.name.trim() || parseMoney(draft.target) === null || amount(draft.target) <= 0n}>Save goal</button></form></Modal>}</>;
+  function renderPlan(bucket: SavingsBucket) {
+    const balance = balances.get(bucket.id) ?? 0n, target = amount(bucket.target);
+    const percent = Math.max(0, Math.min(100, Number(balance * 100n / target)));
+    return <div className={`goal-row savings-plan ${bucket.isActive ? '' : 'archived'}`} key={bucket.id} role="listitem">
+      <div className="goal-icon" aria-hidden="true">{bucket.name.toLowerCase().includes('car') ? '↗' : '◎'}</div>
+      <button className="goal-copy" onClick={() => open(bucket)}>
+        <strong>{bucket.name}{!bucket.isActive && <small>Archived</small>}</strong>
+        <span className={balance < 0n ? 'negative' : ''}>{formatMoney(balance)} <span className="muted">/ {formatMoney(target)}</span></span>
+        <progress className="goal-progress" max="100" value={percent} aria-label={`${bucket.name}: ${Math.round(percent)} percent saved`}/>
+      </button>
+      <div className="goal-actions">
+        <button className="text-button" aria-label={`Edit savings plan ${bucket.name}`} onClick={() => open(bucket)}>Edit</button>
+        <button className="text-button" aria-label={`${bucket.isActive ? 'Archive' : 'Restore'} savings plan ${bucket.name}`} onClick={() => setActive(bucket, !bucket.isActive)}>{bucket.isActive ? 'Archive' : 'Restore'}</button>
+      </div>
+    </div>;
+  }
+  return <>
+    <PageHeading title="Savings &amp; Payoffs" subtitle="Build savings and plan your fixed monthly payments."><button className="primary" onClick={() => open()}>+ New goal</button></PageHeading>
+    <PaymentManager ledger={ledger} update={update}/>
+    <section className="card">
+      <div className="section-heading"><h2>Your savings plans</h2><span className="muted small">{active.length} active</span></div>
+      <p className="muted small">Add actual contributions in Budget to build your progress. These are your recorded allocations, not verified bank balances.</p>
+      {message && <p className="success small" role="status">{message}</p>}
+      {active.length > 0 ? <div className="goal-list" role="list" aria-label="Active savings plans">{active.map(renderPlan)}</div>
+        : <Empty title={archived.length ? 'No active savings plans' : 'Dream a little'} text={archived.length ? 'Create a new goal or open Archived plans below to restore one.' : 'A car, a holiday, a rainy day. Create a goal and start with your next pay period.'}/>}
+      {archived.length > 0 && <div className="savings-archive">
+        <button className="secondary savings-archive-toggle" aria-expanded={showArchived} aria-controls={archiveID} onClick={() => setShowArchived(value => !value)}>{showArchived ? 'Hide' : 'View'} archived plans ({archived.length})</button>
+        <div id={archiveID} hidden={!showArchived}>
+          <h3>Archived plans</h3><p className="muted small">Balances and history are kept. Restore a plan to show it on Home and add new contributions.</p>
+          <div className="goal-list" role="list" aria-label="Archived savings plans">{archived.map(renderPlan)}</div>
+        </div>
+      </div>}
+    </section>
+    <p className="footer-note">Archiving hides a plan and keeps every contribution and withdrawal. Restore it from Archived plans, or pull from its saved funds in Budget.</p>
+    <SavingsInterestCalculator buckets={ledger.savingsBuckets} balances={balances}/>
+    {draft && <Modal title={ledger.savingsBuckets.some(b => b.id === draft.id) ? 'Edit savings goal' : 'New savings goal'} onClose={() => setDraft(null)}><form onSubmit={save}>
+      <label className="field">Goal name<input required maxLength={60} placeholder="A new car" value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })}/></label>
+      <Money label="Target" value={draft.target} onChange={target => setDraft({ ...draft, target })}/>
+      <label className="check-row"><input type="checkbox" checked={draft.isActive} onChange={e => setDraft({ ...draft, isActive: e.target.checked })}/>Active goal</label>
+      {error && <p className="error" role="alert">{error}</p>}
+      <button className="primary full" disabled={!draft.name.trim() || parseMoney(draft.target) === null || amount(draft.target) <= 0n}>Save goal</button>
+    </form></Modal>}
+  </>;
 }
 
 function Schedule({ ledger, update, monthID }: { ledger: Ledger; update: (l: Ledger) => void; monthID?: string }) {

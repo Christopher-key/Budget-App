@@ -46,6 +46,11 @@ the active ones. Recorded amounts remain in totals when a category is removed.
 See [custom expense instructions](CUSTOM-EXPENSES.md) for history, transactions,
 fixed payments, and export behavior.
 
+In **Savings & Payoffs**, **Archive** hides a savings plan from the active list
+and Home. Open **View archived plans** to see its saved balance or **Restore**
+it. Previously inactive plans appear in that collapsed archive automatically;
+archiving does not erase recorded savings or prevent withdrawals from the plan.
+
 **Settings → Appearance** provides account-controlled **Animations** and
 **Dark mode** switches. Home has a rotating sun by day and twinkling stars in
 the evening. See [appearance settings](APPEARANCE.md) for defaults, greeting

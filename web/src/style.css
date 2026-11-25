@@ -172,6 +172,9 @@ small, .small { font-size: .78rem; line-height: 1.65; }
 .privacy-list li { margin-bottom: 8px; }
 .privacy-note { background: var(--amber-wash); border-radius: 9px; padding: 14px; font-size: .73rem; color: var(--amber-ink); line-height: 1.7; margin: 20px 0; }
 .goal-list { display: grid; gap: 14px; }
+.savings-archive { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
+.savings-archive-toggle { width: 100%; text-align: left; }
+.savings-archive h3 { margin: 24px 0 8px; }
 .interest-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 26px; align-items: start; }
 .interest-layout > div { min-width: 0; }
 .interest-calculator .money-input { grid-template-columns: minmax(0, 1fr) 140px; margin: 0 0 20px; }
@@ -396,6 +399,7 @@ td { font-variant-numeric: tabular-nums; }
   .savings-hero p:last-child { max-width: 220px; }
   .goal-row { flex-wrap: wrap; padding: 18px; }
   .goal-actions { margin-left: 53px; }
+  .savings-plan .goal-actions { flex-basis: calc(100% - 53px); }
   .goal-actions button { padding: 7px 10px; }
   .goal-progress { max-width: 100%; }
   .transaction-main { gap: 10px; }
